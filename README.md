@@ -96,7 +96,14 @@ RAG_Project/
 
 ## 如何运行
 
-1.  **启动后端服务**:
+1.  **环境准备**:
+    *   确保已安装 Python 3.8 或更高版本。
+    *   确保已安装所有依赖项。可以通过运行以下命令来安装所有依赖项：
+        ```bash
+        pip install -r requirements.txt
+        ```
+
+2.  **启动后端服务**:
     *   确保您的终端位于项目根目录 (`RAG_Project/`) 下。
     *   运行以下命令:
         ```bash
@@ -104,6 +111,7 @@ RAG_Project/
         ```
     *   后端服务成功启动后，您应该会在终端看到类似 `Uvicorn running on http://0.0.0.0:8000` 的信息。
 
-2.  **访问前端界面**:
-    *   在您的网页浏览器中`file:///path/to/your/RAG_Project/frontend/index.html`
+3.  **访问前端界面**:
+    *   file:///c%3A/Users/jiang/OneDrive/code/RAG/frontend/index.html
 
+## 主要API端点 (后端: `http://localhost:8000`)
