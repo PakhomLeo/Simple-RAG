@@ -204,9 +204,11 @@ function renderSimilarityChart(scores) {
         similarityChartInstance.destroy(); // 销毁旧图表实例以避免重叠
     }
 
+    const exponent = 2; // 可以调整这个指数，例如 2 或 3
+
     const labels = scores.map(score => `来源块 ID: ${score.source_chunk_id.substring(0, 8)}... (${score.source_document_name || 'N/A'})`);
-    const ragSimilarityData = scores.map(score => score.similarity_with_rag_answer);
-    const llmOnlySimilarityData = scores.map(score => score.similarity_with_llm_only_answer);
+    const ragSimilarityData = scores.map(score => Math.pow(score.similarity_with_rag_answer, exponent));
+    const llmOnlySimilarityData = scores.map(score => Math.pow(score.similarity_with_llm_only_answer, exponent));
 
     const data = {
         labels: labels,
@@ -240,7 +242,7 @@ function renderSimilarityChart(scores) {
                     suggestedMax: 1, // Y轴最大值为1 (余弦相似度范围)
                     title: {
                         display: true,
-                        text: '余弦相似度'
+                        text: `调整后的相似度 (原始值^${exponent})`
                     }
                 },
                 x: {
