@@ -1,0 +1,9 @@
+fastapi
+uvicorn
+python-dotenv
+pymilvus
+requests
+ollama
+markdown-it-py
+python-multipart
+numpy 

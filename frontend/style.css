@@ -1,0 +1,417 @@
+@import url('https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&display=swap');
+
+:root {
+    --primary-color: #007bff;
+    --primary-hover-color: #0056b3;
+    --secondary-color: #6c757d;
+    --light-bg: #eef2f7; /* 更中性的浅灰背景 */
+    --white-bg: #ffffff;
+    --text-color: #212529;
+    --muted-text-color: #6c757d;
+    --border-color: #dee2e6;
+    --success-color: #28a745;
+    --error-color: #dc3545;
+
+    /* 鲜艳的强调色 */
+    --accent-teal: #20c997;
+    --accent-orange: #fd7e14;
+    --accent-purple: #6f42c1;
+    --accent-red: #e84545;
+    --accent-blue: #3d8bfd; /* 一个与主蓝不同的强调蓝 */
+
+    --font-family-sans-serif: 'Inter', -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, "Helvetica Neue", Arial, sans-serif;
+    --border-radius: 0.5rem; /* 稍微大一点的圆角，更现代 */
+    --border-radius-sm: 0.25rem;
+    --box-shadow: 0 0.75rem 1.5rem rgba(18, 38, 63, 0.06); /* 更柔和、自然的阴影 */
+    --box-shadow-sm: 0 0.25rem 0.5rem rgba(18, 38, 63, 0.04);
+}
+
+*,
+*::before,
+*::after {
+    box-sizing: border-box;
+}
+
+body {
+    font-family: var(--font-family-sans-serif);
+    margin: 0;
+    background-color: var(--light-bg);
+    color: var(--text-color);
+    line-height: 1.65; /* 增加行高 */
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    padding: 25px;
+    min-height: 100vh;
+}
+
+.container {
+    /* background-color: var(--light-bg);  Container现在是画布，背景与body一致 */
+    /* box-shadow: none; */ /* 移除主容器阴影，因为section会变成卡片 */
+    /* padding: 15px; */ /* 调整内边距，为卡片留出空间 */
+    background-color: var(--white-bg); /* 保持外部容器为白色卡片 */
+    padding: 20px; /* 给外部容器一些内边距 */
+    border-radius: var(--border-radius);
+    box-shadow: var(--box-shadow);
+    width: 100%;
+    max-width: 960px; /* 增加最大宽度 */
+}
+
+h1, h2, h3, h4 {
+    margin-top: 0;
+    margin-bottom: 0.75rem;
+    font-weight: 600;
+}
+
+h1 {
+    text-align: center;
+    color: var(--text-color);
+    font-size: 2.25rem; /* 增大标题 */
+    margin-bottom: 2.5rem;
+    font-weight: 700;
+}
+
+/* Sections as Cards */
+.section {
+    background-color: var(--white-bg);
+    padding: 25px 30px;
+    border-radius: var(--border-radius);
+    box-shadow: var(--box-shadow-sm); /* 使用较小的阴影 */
+    margin-bottom: 2rem;
+    border-top: 4px solid transparent; /* 准备用于强调色 */
+    transition: transform 0.2s ease-out, box-shadow 0.2s ease-out;
+}
+
+.section:hover {
+    transform: translateY(-3px);
+    box-shadow: var(--box-shadow); /* 悬停时阴影变大 */
+}
+
+/* 为不同的section卡片应用不同的强调色顶部边框 */
+.section:nth-of-type(1) { /* 上传文档 */
+    border-top-color: var(--accent-teal);
+}
+
+.section:nth-of-type(2) { /* 配置与提问 */
+    border-top-color: var(--accent-orange);
+}
+
+.section.results-section { /* 结果展示 */
+    border-top-color: var(--accent-purple);
+}
+
+/* 新增: 为引用来源section卡片应用强调色 */
+.section.source-section {
+    border-top-color: var(--accent-blue); /* 使用不同的强调色 */
+}
+
+h2 {
+    font-size: 1.5rem; /* 调整h2大小 */
+    color: var(--text-color);
+    /* border-bottom: 1px solid var(--border-color); */ /* 移除h2的下边框，因为section顶部已有强调色 */
+    padding-bottom: 0.5rem;
+    margin-top: 0; /* section内部的h2不需要大的上边距 */
+    margin-bottom: 1.75rem; /* 增加h2和内容之间的距离 */
+}
+
+h3 {
+    font-size: 1.2rem;
+    color: var(--text-color);
+    margin-bottom: 1rem;
+}
+
+h4 {
+    font-size: 1rem;
+    color: var(--muted-text-color);
+    margin-bottom: 0.5rem;
+    font-weight: 500;
+}
+
+label {
+    display: block;
+    margin-bottom: 0.6rem;
+    font-weight: 500;
+    color: var(--text-color);
+}
+
+input[type="file"],
+input[type="number"],
+textarea {
+    width: 100%;
+    padding: 0.8rem 1rem;
+    margin-bottom: 1.25rem;
+    border: 1px solid var(--border-color);
+    border-radius: var(--border-radius-sm);
+    box-sizing: border-box;
+    font-family: inherit;
+    font-size: 0.95rem;
+    background-color: var(--white-bg);
+    color: var(--text-color);
+    transition: border-color 0.15s ease-in-out, box-shadow 0.15s ease-in-out;
+}
+
+input[type="file"] {
+    padding-top: 0.6rem; 
+    padding-bottom: 0.6rem;
+}
+
+input[type="file"]::file-selector-button {
+    padding: 0.6rem 1rem;
+    border: none; /* 移除边框 */
+    border-radius: var(--border-radius-sm);
+    background-color: var(--primary-color);
+    color: var(--white-bg);
+    cursor: pointer;
+    transition: background-color 0.2s ease-in-out;
+    margin-right: 1rem;
+    font-weight: 500;
+}
+
+input[type="file"]::file-selector-button:hover {
+    background-color: var(--primary-hover-color);
+}
+
+input[type="number"]:focus,
+textarea:focus {
+    border-color: var(--primary-color);
+    outline: 0;
+    box-shadow: 0 0 0 0.2rem rgba(0, 123, 255, 0.2);
+}
+
+textarea {
+    resize: vertical;
+    min-height: 110px;
+}
+
+button {
+    background-color: var(--primary-color);
+    color: white;
+    padding: 0.8rem 1.6rem;
+    border: none;
+    border-radius: var(--border-radius-sm);
+    cursor: pointer;
+    font-size: 1rem;
+    font-weight: 500;
+    transition: background-color 0.2s ease-in-out, transform 0.1s ease, box-shadow 0.2s ease-out;
+}
+
+button:hover {
+    background-color: var(--primary-hover-color);
+    transform: translateY(-2px);
+    box-shadow: 0 4px 8px rgba(0, 123, 255, 0.2);
+}
+
+button:active {
+    transform: translateY(0px);
+    box-shadow: 0 2px 4px rgba(0, 123, 255, 0.15);
+}
+
+#uploadStatus,
+#errorDisplay {
+    margin-top: 1rem;
+    font-size: 0.9rem;
+    padding: 0.8rem 1.2rem;
+    border-radius: var(--border-radius-sm);
+    display: none;
+    border: 1px solid transparent;
+}
+
+#uploadStatus.success,
+#errorDisplay.success-message {
+    color: var(--success-color);
+    background-color: #e0f8e7; /* 更柔和的成功背景 */
+    border-color: #a3e9b3;
+    display: block;
+}
+
+#uploadStatus.error,
+#errorDisplay.error-message {
+    color: var(--error-color);
+    background-color: #fce8e6; /* 更柔和的错误背景 */
+    border-color: #f7c6c0;
+    display: block;
+}
+
+.results-section {
+    /* margin-top: 2.5rem; (由 .section 统一处理) */
+}
+
+.result-container {
+    display: grid;
+    grid-template-columns: repeat(auto-fit, minmax(320px, 1fr));
+    gap: 20px; /* 卡片间距 */
+}
+
+.result-window {
+    background-color: var(--light-bg); /* 结果窗口背景与页面背景稍作区分 */
+    padding: 20px;
+    border-radius: var(--border-radius-sm);
+    border: 1px solid var(--border-color);
+    /* box-shadow: var(--box-shadow-sm); */ /* 内部卡片可以没有阴影，或更轻 */
+    display: flex;
+    flex-direction: column;
+}
+
+.result-window h3 {
+    color: var(--text-color);
+    border-bottom: 1px solid var(--border-color);
+    padding-bottom: 0.6rem;
+    margin-bottom: 1rem;
+    font-size: 1.15rem;
+}
+
+.answer-box {
+    background-color: var(--white-bg);
+    padding: 15px;
+    border-radius: var(--border-radius-sm);
+    border: 1px solid #e7e7e7;
+    min-height: 120px;
+    white-space: pre-wrap;
+    overflow-y: auto;
+    max-height: 380px;
+    font-size: 0.9rem;
+    flex-grow: 1;
+    margin-bottom: 1rem;
+    line-height: 1.6;
+}
+
+/* 新增：引用来源卡片样式 - 现在是顶级section内部的内容容器 */
+.source-details-card {
+    background-color: var(--white-bg); /* 或者可以设为 transparent，如果希望它完全融入父section的背景 */
+    padding: 10px 0px; /* 调整内边距，主要控制上下，左右由父section的padding控制 */
+    /* 以下属性通常由父级.section提供，在此移除或注释掉，除非需要覆盖 */
+    /* border-radius: var(--border-radius-sm); */
+    /* border: 1px solid var(--border-color); */
+    /* box-shadow: var(--box-shadow-sm); */
+    /* margin-top: 1.5rem; */ 
+}
+
+/* .source-details-card h4 的样式可以移除，因为HTML结构中已用h2替代 */
+/*
+.source-details-card h4 {
+    font-size: 1rem;
+    color: var(--text-color);
+    margin-bottom: 0.75rem;
+    font-weight: 600;
+    padding-bottom: 0.5rem;
+    border-bottom: 1px solid #e7e7e7;
+}
+*/
+
+.source-details-content { 
+    font-size: 0.85rem;
+    /* background-color: var(--white-bg); /* 背景由 .source-details-card 提供 */
+    /* padding: 15px; /* 内边距由 .source-details-card 提供或在此微调 */
+    /* border-radius: var(--border-radius-sm); /* 圆角由 .source-details-card 提供 */
+    /* border: 1px solid #e7e7e7; /* 边框由 .source-details-card 提供 */
+    max-height: 260px; /* 调整最大高度以适应卡片内 */
+    overflow-y: auto;
+    margin-top: 0.5rem; /* 内容与标题间距 */
+}
+
+.source-details-content div {
+    margin-bottom: 1rem;
+    padding-bottom: 1rem;
+    border-bottom: 1px dashed #d0d0d0;
+}
+
+.source-details-content div:last-child {
+    border-bottom: none;
+    margin-bottom: 0;
+    padding-bottom: 0;
+}
+
+.source-details-content strong {
+    display: block;
+    color: var(--text-color);
+    margin-bottom: 0.4rem;
+    font-weight: 600;
+}
+
+.source-details-content p {
+    margin-top: 0;
+    margin-bottom: 0;
+    color: var(--muted-text-color);
+    font-size: 0.9em;
+}
+
+.top-k-container div { 
+    display: flex;
+    align-items: center;
+    margin-bottom: 1.25rem;
+}
+
+#topKInput {
+    width: auto;
+    min-width: 70px;
+    max-width: 100px;
+    margin-left: 0.75rem;
+    padding: 0.6rem; /* 减小padding */
+}
+
+/* Responsive adjustments */
+@media (max-width: 992px) { /* 调整断点 */
+    .container {
+        padding: 15px;
+    }
+}
+
+@media (max-width: 768px) {
+    body {
+        padding: 20px;
+    }
+    .container {
+        padding: 15px;
+    }
+    .section {
+        padding: 20px;
+    }
+    h1 {
+        font-size: 2rem;
+    }
+    h2 {
+        font-size: 1.35rem;
+        margin-bottom: 1.5rem;
+    }
+    .result-container {
+        grid-template-columns: 1fr;
+    }
+}
+
+@media (max-width: 480px) {
+    body {
+        padding: 15px 10px;
+    }
+    .container {
+        padding: 10px;
+    }
+    .section {
+        padding: 15px;
+        margin-bottom: 1.5rem;
+    }
+    h1 {
+        font-size: 1.75rem;
+        margin-bottom: 2rem;
+    }
+    h2 {
+        font-size: 1.25rem;
+        margin-bottom: 1.25rem;
+    }
+    button {
+        padding: 0.7rem 1.4rem;
+        font-size: 0.9rem;
+        width: 100%; /* 按钮在小屏幕上占满宽度 */
+        margin-bottom: 0.5rem;
+    }
+    input[type="file"],
+    input[type="number"],
+    textarea {
+        font-size: 0.9rem;
+    }
+     .top-k-container div label {
+        font-size: 0.9rem;
+    }
+    #topKInput {
+        padding: 0.5rem;
+    }
+} 
