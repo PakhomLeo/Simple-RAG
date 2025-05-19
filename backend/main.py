@@ -7,7 +7,7 @@ from typing import List # 导入 List
 
 from backend import crud, models, services, database # 使用相对导入
 from backend.database import SessionLocal, engine, create_db_and_tables
-from backend.config import LLM_MODEL_NAME # 引入LLM_MODEL_NAME
+from backend.config import LLM_MODEL_NAME, MILVUS_SEARCH_MAX_DISTANCE # 引入LLM_MODEL_NAME和新增的距离阈值
 from backend.models import QueryRequest, QueryResponse, DocumentUploadResponse, ErrorResponse, SourceChunk, SimilarityScore
 
 # 配置日志
@@ -189,7 +189,18 @@ async def query_llm(request: QueryRequest, db: Session = Depends(get_db)):
 
         # 2. Milvus 检索
         logger.info(f"Searching Milvus for top-{top_k} chunks.")
-        retrieved_milvus_chunks = services.search_in_milvus(query_embedding[0], top_k)
+        retrieved_milvus_chunks_before_filter = services.search_in_milvus(query_embedding[0], top_k)
+        
+        # 根据距离阈值过滤检索结果
+        retrieved_milvus_chunks = []
+        if retrieved_milvus_chunks_before_filter:
+            for chunk_info in retrieved_milvus_chunks_before_filter:
+                if chunk_info["distance"] <= MILVUS_SEARCH_MAX_DISTANCE:
+                    retrieved_milvus_chunks.append(chunk_info)
+                else:
+                    logger.info(f"Chunk {chunk_info['chunk_id']} with distance {chunk_info['distance']} filtered out (threshold: {MILVUS_SEARCH_MAX_DISTANCE}).")
+            logger.info(f"{len(retrieved_milvus_chunks_before_filter) - len(retrieved_milvus_chunks)} chunks filtered out by distance threshold.")
+
         rag_source_chunks_details = [] 
         rag_context_text = "没有在文档中找到相关信息。" # 默认值
 
