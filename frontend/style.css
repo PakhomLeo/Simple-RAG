@@ -232,10 +232,6 @@ button:active {
     display: block;
 }
 
-.results-section {
-    /* margin-top: 2.5rem; (由 .section 统一处理) */
-}
-
 .result-container {
     display: grid;
     grid-template-columns: repeat(auto-fit, minmax(320px, 1fr));
