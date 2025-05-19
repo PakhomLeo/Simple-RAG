@@ -115,3 +115,5 @@ RAG_Project/
     *   file:///c%3A/Users/jiang/OneDrive/code/RAG/frontend/index.html
 
 ## 主要API端点 (后端: `http://localhost:8000`)
+
+[![Ask DeepWiki](https://deepwiki.com/badge.svg)](https://deepwiki.com/PakhomLeo/Simple-RAG)
