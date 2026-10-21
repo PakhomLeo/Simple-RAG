@@ -362,3 +362,66 @@ def test_sqlite_commit_failure_removes_inserted_vectors(client, app_module, monk
     assert r.status_code == 200, r.text
     assert r.json()[0]["total_chunks"] == 0
     assert _index_state(app_module) == (0, set(), 0)
+
+
+# --- Embedding errors do not expose the embedding host --------------------------------------
+
+
+@pytest.fixture()
+def unreachable_embedding(app_module, monkeypatch):
+    """Point the embedding client at a closed local port. Returns the port."""
+    import socket
+
+    with socket.socket() as s:
+        s.bind(("127.0.0.1", 0))
+        port = s.getsockname()[1]
+    monkeypatch.setattr(app_module.services, "EMBEDDING_API_URL", f"http://127.0.0.1:{port}/api/v3/embeddings")
+    return port
+
+
+def test_query_embedding_failure_hides_host_and_port(client, unreachable_embedding, caplog):
+    """Regression: /query/ answered 400 with the requests error text, which names the embedding host and port."""
+    with caplog.at_level("ERROR"):
+        r = client.post("/query/", json={"question": "hi"})
+    assert r.status_code == 502, r.text
+    assert r.json()["detail"] == "Could not reach the embedding API. See the server log for details."
+    assert "127.0.0.1" not in r.text and str(unreachable_embedding) not in r.text
+    assert str(unreachable_embedding) in caplog.text  # the details stay in the server log
+
+
+def test_query_embedding_http_error_reports_status_only(client, app_module, monkeypatch):
+    url = app_module.services.EMBEDDING_API_URL
+    monkeypatch.setattr(app_module.services, "EMBEDDING_API_URL", url.replace("/embeddings", "/missing"))
+    r = client.post("/query/", json={"question": "hi"})
+    assert r.status_code == 502, r.text
+    assert r.json()["detail"] == "The embedding API returned HTTP 404. See the server log for details."
+    assert "127.0.0.1" not in r.text
+
+
+def test_query_invalid_embedding_response(client, app_module, monkeypatch):
+    class Reply:
+        status_code = 200
+        text = '{"unexpected": true}'
+
+        def raise_for_status(self):
+            pass
+
+        def json(self):
+            return {"unexpected": True}
+
+    monkeypatch.setattr(app_module.services.requests, "post", lambda *a, **k: Reply())
+    r = client.post("/query/", json={"question": "hi"})
+    assert r.status_code == 502, r.text
+    assert r.json()["detail"] == "Invalid response from the embedding API. See the server log for details."
+
+
+def test_upload_embedding_failure_hides_host_and_port(client, unreachable_embedding):
+    r = client.post("/upload/", files=[_md("doc.md", "some content. " * 30)])
+    assert r.status_code == 200, r.text
+    item = r.json()[0]
+    assert item["total_chunks"] == 0
+    assert (
+        item["message"]
+        == "Error processing document: Could not reach the embedding API. See the server log for details."
+    )
+    assert "127.0.0.1" not in r.text and str(unreachable_embedding) not in r.text

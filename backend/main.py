@@ -292,6 +292,10 @@ def _store_chunks(db: Session, display_name: str, chunks: List[str]) -> Document
         return DocumentUploadResponse(
             filename=display_name, message="Document processed and stored successfully.", total_chunks=len(chunks)
         )
+    except services.EmbeddingError as ee:
+        # The details (URL, host, port, response body) are already in the server log; ee is safe to return.
+        logger.error(f"Embedding failed for file {display_name}: {ee}")
+        message = f"Error processing document: {ee}"
     except ValueError as ve:
         logger.error(f"ValueError during processing file {display_name}: {ve}", exc_info=True)
         message = f"Error processing document (ValueError): {str(ve)}"
@@ -328,7 +332,7 @@ def _undo_file(db: Session, display_name: str, inserted_ids: List[str]) -> None:
 @app.post(
     "/query/",
     response_model=QueryResponse,
-    responses={500: {"model": ErrorResponse}, 503: {"model": ErrorResponse}},
+    responses={500: {"model": ErrorResponse}, 502: {"model": ErrorResponse}, 503: {"model": ErrorResponse}},
     dependencies=[Depends(require_api_key)],
 )
 async def query_llm(request: QueryRequest, db: Session = Depends(get_db)):
@@ -453,6 +457,10 @@ async def query_llm(request: QueryRequest, db: Session = Depends(get_db)):
             similarity_scores=similarity_scores_list if similarity_scores_list else None,
         )
 
+    except services.EmbeddingError as ee:
+        # The embedding API is an upstream service: 502. The details are only in the server log.
+        logger.error(f"Embedding failed during query processing: {ee}")
+        raise HTTPException(status_code=502, detail=str(ee))
     except ValueError as ve:
         logger.error(f"ValueError during query processing: {ve}", exc_info=True)
         raise HTTPException(status_code=400, detail=str(ve))

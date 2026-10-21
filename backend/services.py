@@ -74,6 +74,14 @@ def split_text_into_chunks(text: str, chunk_size: int = CHUNK_SIZE, chunk_overla
 
 
 # --- Embedding Service ---
+class EmbeddingError(ValueError):
+    """The embedding API failed. ``str(error)`` is safe to show to clients: it never contains the API URL,
+    host or port. The details are written to the server log."""
+
+    def __str__(self) -> str:
+        return f"{super().__str__()} See the server log for details."
+
+
 def get_embeddings(texts: List[str]) -> List[List[float]]:
     """
     调用火山方舟 Embedding API 将一批文本转换为向量表示。
@@ -85,7 +93,7 @@ def get_embeddings(texts: List[str]) -> List[List[float]]:
         一个包含对应文本向量的列表，每个向量是一个浮点数列表。
 
     Raises:
-        ValueError: 如果API请求失败或返回数据格式不正确。
+        EmbeddingError: 如果API请求失败或返回数据格式不正确（消息不含主机和端口，细节只写服务端日志）。
     """
     if not texts:
         return []
@@ -102,41 +110,42 @@ def get_embeddings(texts: List[str]) -> List[List[float]]:
 
     logger.info(f"Requesting embeddings for {len(texts)} text snippets from {EMBEDDING_API_URL}")
 
-    response = None
     try:
         response = requests.post(EMBEDDING_API_URL, headers=headers, json=payload, timeout=EMBEDDING_TIMEOUT_SECONDS)
-        response.raise_for_status()  # Will raise an HTTPError for bad responses (4xx or 5xx)
+    except requests.exceptions.Timeout as e:
+        logger.error(f"Embedding API request to {EMBEDDING_API_URL} timed out: {e}")
+        raise EmbeddingError("The embedding API did not answer in time.") from e
+    except requests.exceptions.RequestException as e:
+        logger.error(f"Error calling Embedding API at {EMBEDDING_API_URL}: {e}")
+        raise EmbeddingError("Could not reach the embedding API.") from e
+
+    try:
+        response.raise_for_status()
+    except requests.exceptions.HTTPError as e:
+        status = getattr(response, "status_code", "error")
+        logger.error(f"Embedding API at {EMBEDDING_API_URL} returned HTTP {status}: {e}; body: {response.text[:2000]}")
+        raise EmbeddingError(f"The embedding API returned HTTP {status}.") from e
+
+    try:
         response_data = response.json()
-
         if "data" not in response_data or not isinstance(response_data["data"], list):
-            logger.error(f"Unexpected response format from embedding API: {response_data}")
             raise ValueError("Embedding API response missing 'data' list.")
-
         embeddings = []
         for item in response_data["data"]:
             if "embedding" not in item or not isinstance(item["embedding"], list):
-                logger.error(f"Embedding item missing 'embedding' list: {item}")
                 raise ValueError("Invalid embedding item format.")
             embeddings.append(item["embedding"])
-
-        logger.info(f"Successfully retrieved {len(embeddings)} embeddings.")
-        # 校验第一个embedding的维度，如果需要的话
-        if embeddings and MILVUS_DIMENSION != len(embeddings[0]):
-            logger.warning(
-                f"Milvus dimension ({MILVUS_DIMENSION}) might not match actual embedding dimension ({len(embeddings[0])})."
-            )
-            # 可以选择在这里抛出错误或动态调整MILVUS_DIMENSION，但后者更复杂
-            # raise ValueError(f"Embedding dimension mismatch: Expected {MILVUS_DIMENSION}, Got {len(embeddings[0])}")
-
-        return embeddings
-    except requests.exceptions.RequestException as e:
-        logger.error(f"Error calling Embedding API: {e}")
-        logger.error(f"Response content: {response.text if response is not None else 'No response'}")
-        raise ValueError(f"Embedding API request failed: {e}")
     except (KeyError, TypeError, ValueError) as e:
-        logger.error(f"Error processing embedding API response: {e}")
-        logger.error(f"Response content: {response_data if 'response_data' in locals() else 'Unknown response data'}")
-        raise ValueError(f"Invalid response from Embedding API: {e}")
+        logger.error(f"Invalid response from Embedding API at {EMBEDDING_API_URL}: {e}; body: {response.text[:2000]}")
+        raise EmbeddingError("Invalid response from the embedding API.") from e
+
+    logger.info(f"Successfully retrieved {len(embeddings)} embeddings.")
+    # 校验第一个embedding的维度
+    if embeddings and MILVUS_DIMENSION != len(embeddings[0]):
+        logger.warning(
+            f"Milvus dimension ({MILVUS_DIMENSION}) might not match actual embedding dimension ({len(embeddings[0])})."
+        )
+    return embeddings
 
 
 # --- Cosine Similarity --- # <--- 新增区域

@@ -44,8 +44,10 @@ def test_get_embeddings_connection_error_is_value_error(monkeypatch):
         raise requests.exceptions.ConnectionError("unreachable")
 
     monkeypatch.setattr(services.requests, "post", boom)
-    with pytest.raises(ValueError, match="Embedding API request failed"):
+    # EmbeddingError is a ValueError; its message names no host or port.
+    with pytest.raises(ValueError, match="Could not reach the embedding API") as info:
         services.get_embeddings(["x"])
+    assert isinstance(info.value, services.EmbeddingError)
 
 
 def test_get_embeddings_sets_timeout(monkeypatch):
