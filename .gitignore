@@ -1,9 +1,13 @@
 # Python
 venv/
+.venv/
 *.pyc
 __pycache__/
+.pytest_cache/
+.ruff_cache/
 *.env
 .env
+!.env.example
 
 # IDE / Editor specific
 .vscode/
@@ -11,10 +15,12 @@ __pycache__/
 *.swp
 *.swo
 
-# SQLite database
+# SQLite and Milvus Lite databases
 *.db
-*.db-journal # SQLite journal file
+# SQLite journal file
+*.db-journal
+.*.db.lock
 
 # OS generated files
 .DS_Store
-Thumbs.db 
+Thumbs.db

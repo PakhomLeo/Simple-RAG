@@ -341,6 +341,14 @@ button:active {
     margin-bottom: 1.25rem;
 }
 
+#apiKeyInput {
+    width: auto;
+    min-width: 220px;
+    max-width: 320px;
+    margin-left: 0.75rem;
+    padding: 0.6rem;
+}
+
 #topKInput {
     width: auto;
     min-width: 70px;

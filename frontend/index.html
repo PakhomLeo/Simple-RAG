@@ -5,7 +5,7 @@
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>Simple RAG</title>
     <link rel="stylesheet" href="style.css">
-    <script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
+    <script src="https://cdn.jsdelivr.net/npm/chart.js@4.5.1/dist/chart.umd.min.js" integrity="sha384-jb8JQMbMoBUzgWatfe6COACi2ljcDdZQ2OxczGA3bGNeWe+6DChMTBJemed7ZnvJ" crossorigin="anonymous"></script>
 </head>
 <body>
     <div class="container">
@@ -25,6 +25,10 @@
                 <div>
                     <label for="topKInput">Top-K (检索数量):</label>
                     <input type="number" id="topKInput" value="3" min="1" max="10">
+                </div>
+                <div>
+                    <label for="apiKeyInput">API Key (可选):</label>
+                    <input type="password" id="apiKeyInput" placeholder="仅当后端设置了 SIMPLE_RAG_API_KEY 时填写" autocomplete="off">
                 </div>
             </div>
             <textarea id="questionInput" rows="4" placeholder="在此输入您的问题..."></textarea>

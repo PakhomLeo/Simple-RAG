@@ -1,0 +1,6 @@
+-r requirements.txt
+pytest>=8
+httpx>=0.27
+ruff>=0.6
+# Local Milvus file backend for the demo stack and integration tests (MILVUS_CONNECTION_URI=./milvus_lite.db).
+milvus-lite>=2.4

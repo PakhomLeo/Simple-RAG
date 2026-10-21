@@ -1,0 +1,30 @@
+[project]
+name = "simple-rag"
+version = "0.1.0"
+description = "A local Retrieval-Augmented Generation (RAG) app: Markdown in, Milvus + SQLite retrieval, Ollama answers with and without context."
+readme = "README.md"
+license = "MIT"
+license-files = ["LICENSE"]
+requires-python = ">=3.9"
+authors = [{ name = "PakhomLeo" }]
+
+[tool.ruff]
+line-length = 120
+target-version = "py39"
+extend-exclude = ["Markdown"]
+
+[tool.ruff.lint]
+select = ["E", "F", "W", "I"]
+ignore = ["E501"]
+
+[tool.ruff.lint.isort]
+known-first-party = ["backend"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+addopts = "-q"
+filterwarnings = [
+    "ignore::DeprecationWarning:pymilvus.*",
+    "ignore:.*ORM-style PyMilvus API.*",
+    "ignore:.*declarative_base.*",
+]

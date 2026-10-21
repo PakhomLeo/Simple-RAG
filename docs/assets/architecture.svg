@@ -1,0 +1,89 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="960" height="520" viewBox="0 0 960 520" role="img" aria-labelledby="title desc" font-family="Inter, Segoe UI, Helvetica, Arial, sans-serif">
+  <title id="title">Simple RAG architecture</title>
+  <desc id="desc">A browser UI talks to a FastAPI backend. The backend stores chunk text in SQLite and vectors in Milvus, calls an embedding API for vectors and Ollama for answers.</desc>
+  <style>
+    .bg { fill: #ffffff; }
+    .box { fill: #f6f8fa; stroke: #57606a; stroke-width: 1.5; }
+    .core { fill: #ddf4ff; stroke: #0969da; stroke-width: 2; }
+    .ext { fill: #fff8c5; stroke: #9a6700; stroke-width: 1.5; stroke-dasharray: 6 4; }
+    .store { fill: #dafbe1; stroke: #1a7f37; stroke-width: 1.5; }
+    .t { fill: #1f2328; font-size: 16px; font-weight: 600; }
+    .s { fill: #57606a; font-size: 13px; }
+    .lbl { fill: #57606a; font-size: 12px; }
+    .edge { stroke: #57606a; stroke-width: 1.6; fill: none; }
+    .arrow { fill: #57606a; }
+    .group { fill: none; stroke: #d0d7de; stroke-width: 1.2; stroke-dasharray: 3 3; }
+    .gt { fill: #8c959f; font-size: 12px; letter-spacing: 1px; }
+    @media (prefers-color-scheme: dark) {
+      .bg { fill: #0d1117; }
+      .box { fill: #161b22; stroke: #8b949e; }
+      .core { fill: #0c2d6b; stroke: #58a6ff; }
+      .ext { fill: #3b2e00; stroke: #d29922; }
+      .store { fill: #04260f; stroke: #3fb950; }
+      .t { fill: #e6edf3; }
+      .s, .lbl { fill: #9da7b3; }
+      .edge { stroke: #9da7b3; }
+      .arrow { fill: #9da7b3; }
+      .group { stroke: #30363d; }
+      .gt { fill: #6e7681; }
+    }
+  </style>
+  <defs>
+    <marker id="a" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="8" markerHeight="8" orient="auto-start-reverse">
+      <path class="arrow" d="M0,0 L10,5 L0,10 z"/>
+    </marker>
+  </defs>
+  <rect class="bg" width="960" height="520"/>
+
+  <!-- Browser -->
+  <rect class="box" x="30" y="190" width="200" height="130" rx="10"/>
+  <text class="t" x="130" y="225" text-anchor="middle">Browser UI</text>
+  <text class="s" x="130" y="250" text-anchor="middle">frontend/ (HTML, CSS, JS)</text>
+  <text class="s" x="130" y="270" text-anchor="middle">Chart.js similarity chart</text>
+  <text class="s" x="130" y="290" text-anchor="middle">served at / (same origin)</text>
+
+  <!-- Backend -->
+  <rect class="group" x="290" y="60" width="300" height="400" rx="14"/>
+  <text class="gt" x="305" y="82">LOCAL MACHINE · 127.0.0.1:8000</text>
+  <rect class="core" x="310" y="100" width="260" height="340" rx="10"/>
+  <text class="t" x="440" y="132" text-anchor="middle">FastAPI backend</text>
+  <text class="s" x="440" y="152" text-anchor="middle">backend/main.py</text>
+  <rect class="box" x="330" y="172" width="220" height="56" rx="8"/>
+  <text class="t" x="440" y="196" text-anchor="middle" font-size="14">POST /upload/</text>
+  <text class="s" x="440" y="215" text-anchor="middle">parse → chunk → embed → store</text>
+  <rect class="box" x="330" y="240" width="220" height="56" rx="8"/>
+  <text class="t" x="440" y="264" text-anchor="middle" font-size="14">POST /query/</text>
+  <text class="s" x="440" y="283" text-anchor="middle">embed → search → prompt → LLM</text>
+  <rect class="box" x="330" y="308" width="220" height="56" rx="8"/>
+  <text class="t" x="440" y="332" text-anchor="middle" font-size="14">services.py</text>
+  <text class="s" x="440" y="351" text-anchor="middle">chunking · cosine similarity</text>
+  <text class="s" x="440" y="392" text-anchor="middle">Optional X-API-Key · CORS allow-list</text>
+  <text class="s" x="440" y="412" text-anchor="middle">Upload size / count limits</text>
+
+  <!-- Stores -->
+  <rect class="store" x="650" y="70" width="270" height="80" rx="10"/>
+  <text class="t" x="785" y="103" text-anchor="middle">SQLite</text>
+  <text class="s" x="785" y="125" text-anchor="middle">chunk_id · original text · file name</text>
+  <rect class="store" x="650" y="170" width="270" height="80" rx="10"/>
+  <text class="t" x="785" y="203" text-anchor="middle">Milvus / Milvus Lite</text>
+  <text class="s" x="785" y="225" text-anchor="middle">chunk_id · embedding vector</text>
+
+  <!-- External -->
+  <rect class="ext" x="650" y="290" width="270" height="70" rx="10"/>
+  <text class="t" x="785" y="320" text-anchor="middle">Embedding API</text>
+  <text class="s" x="785" y="342" text-anchor="middle">e.g. Volcengine Ark (ARK_API_KEY)</text>
+  <rect class="ext" x="650" y="380" width="270" height="70" rx="10"/>
+  <text class="t" x="785" y="410" text-anchor="middle">Ollama</text>
+  <text class="s" x="785" y="432" text-anchor="middle">local LLM, e.g. qwen3:4b</text>
+
+  <!-- Edges -->
+  <path class="edge" d="M230,240 L310,240" marker-end="url(#a)"/>
+  <path class="edge" d="M310,275 L230,275" marker-end="url(#a)"/>
+  <text class="lbl" x="270" y="232" text-anchor="middle">JSON</text>
+  <text class="lbl" x="270" y="292" text-anchor="middle">answers</text>
+  <path class="edge" d="M570,140 L650,110" marker-end="url(#a)"/>
+  <path class="edge" d="M570,205 L650,210" marker-end="url(#a)"/>
+  <path class="edge" d="M570,320 L650,325" marker-end="url(#a)" stroke-dasharray="5 4"/>
+  <path class="edge" d="M570,390 L650,415" marker-end="url(#a)" stroke-dasharray="5 4"/>
+  <text class="lbl" x="610" y="485" text-anchor="middle">dashed = external service, configured by .env</text>
+</svg>

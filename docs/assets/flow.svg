@@ -1,0 +1,118 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="960" height="560" viewBox="0 0 960 560" role="img" aria-labelledby="title desc" font-family="Inter, Segoe UI, Helvetica, Arial, sans-serif">
+  <title id="title">Simple RAG upload and query flow</title>
+  <desc id="desc">Upload: clear Milvus, parse Markdown, split into chunks, save to SQLite, embed, insert into Milvus. Query: embed question, search Top-K, filter by distance, load text from SQLite, build prompt, ask the LLM with and without context, compute similarity, return.</desc>
+  <style>
+    .bg { fill: #ffffff; }
+    .step { fill: #f6f8fa; stroke: #57606a; stroke-width: 1.4; }
+    .hi { fill: #ddf4ff; stroke: #0969da; stroke-width: 1.8; }
+    .ext { fill: #fff8c5; stroke: #9a6700; stroke-width: 1.4; }
+    .t { fill: #1f2328; font-size: 14px; font-weight: 600; }
+    .s { fill: #57606a; font-size: 12px; }
+    .h { fill: #1f2328; font-size: 18px; font-weight: 700; }
+    .edge { stroke: #57606a; stroke-width: 1.6; fill: none; }
+    .arrow { fill: #57606a; }
+    .lane { fill: none; stroke: #d0d7de; stroke-width: 1.2; }
+    @media (prefers-color-scheme: dark) {
+      .bg { fill: #0d1117; }
+      .step { fill: #161b22; stroke: #8b949e; }
+      .hi { fill: #0c2d6b; stroke: #58a6ff; }
+      .ext { fill: #3b2e00; stroke: #d29922; }
+      .t, .h { fill: #e6edf3; }
+      .s { fill: #9da7b3; }
+      .edge { stroke: #9da7b3; }
+      .arrow { fill: #9da7b3; }
+      .lane { stroke: #30363d; }
+    }
+  </style>
+  <defs>
+    <marker id="a" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="8" markerHeight="8" orient="auto">
+      <path class="arrow" d="M0,0 L10,5 L0,10 z"/>
+    </marker>
+  </defs>
+  <rect class="bg" width="960" height="560"/>
+
+  <rect class="lane" x="20" y="20" width="920" height="190" rx="12"/>
+  <text class="h" x="40" y="50">1 · Upload (POST /upload/)</text>
+  <g>
+    <rect class="step" x="40" y="80" width="130" height="90" rx="8"/>
+    <text class="t" x="105" y="115" text-anchor="middle">Clear Milvus</text>
+    <text class="s" x="105" y="135" text-anchor="middle">drop collection</text>
+    <text class="s" x="105" y="152" text-anchor="middle">(once per batch)</text>
+
+    <rect class="step" x="190" y="80" width="130" height="90" rx="8"/>
+    <text class="t" x="255" y="115" text-anchor="middle">Check file</text>
+    <text class="s" x="255" y="135" text-anchor="middle">.md only, size,</text>
+    <text class="s" x="255" y="152" text-anchor="middle">UTF-8</text>
+
+    <rect class="step" x="340" y="80" width="130" height="90" rx="8"/>
+    <text class="t" x="405" y="115" text-anchor="middle">Parse + chunk</text>
+    <text class="s" x="405" y="135" text-anchor="middle">markdown-it-py</text>
+    <text class="s" x="405" y="152" text-anchor="middle">size + overlap</text>
+
+    <rect class="hi" x="490" y="80" width="130" height="90" rx="8"/>
+    <text class="t" x="555" y="115" text-anchor="middle">Save text</text>
+    <text class="s" x="555" y="135" text-anchor="middle">SQLite</text>
+    <text class="s" x="555" y="152" text-anchor="middle">uuid4 chunk_id</text>
+
+    <rect class="ext" x="640" y="80" width="130" height="90" rx="8"/>
+    <text class="t" x="705" y="115" text-anchor="middle">Embed</text>
+    <text class="s" x="705" y="135" text-anchor="middle">Embedding API</text>
+    <text class="s" x="705" y="152" text-anchor="middle">batch of chunks</text>
+
+    <rect class="hi" x="790" y="80" width="130" height="90" rx="8"/>
+    <text class="t" x="855" y="115" text-anchor="middle">Insert vectors</text>
+    <text class="s" x="855" y="135" text-anchor="middle">Milvus + flush</text>
+  </g>
+  <path class="edge" d="M170,125 L190,125" marker-end="url(#a)"/>
+  <path class="edge" d="M320,125 L340,125" marker-end="url(#a)"/>
+  <path class="edge" d="M470,125 L490,125" marker-end="url(#a)"/>
+  <path class="edge" d="M620,125 L640,125" marker-end="url(#a)"/>
+  <path class="edge" d="M770,125 L790,125" marker-end="url(#a)"/>
+
+  <rect class="lane" x="20" y="235" width="920" height="305" rx="12"/>
+  <text class="h" x="40" y="265">2 · Query (POST /query/)</text>
+  <rect class="ext" x="40" y="295" width="130" height="90" rx="8"/>
+  <text class="t" x="105" y="330" text-anchor="middle">Embed question</text>
+  <text class="s" x="105" y="350" text-anchor="middle">Embedding API</text>
+
+  <rect class="hi" x="190" y="295" width="130" height="90" rx="8"/>
+  <text class="t" x="255" y="330" text-anchor="middle">Search Top-K</text>
+  <text class="s" x="255" y="350" text-anchor="middle">Milvus, L2</text>
+  <text class="s" x="255" y="367" text-anchor="middle">1 ≤ top_k ≤ 50</text>
+
+  <rect class="step" x="340" y="295" width="130" height="90" rx="8"/>
+  <text class="t" x="405" y="330" text-anchor="middle">Filter</text>
+  <text class="s" x="405" y="350" text-anchor="middle">distance ≤</text>
+  <text class="s" x="405" y="367" text-anchor="middle">MAX_DISTANCE</text>
+
+  <rect class="hi" x="490" y="295" width="130" height="90" rx="8"/>
+  <text class="t" x="555" y="330" text-anchor="middle">Load text</text>
+  <text class="s" x="555" y="350" text-anchor="middle">SQLite by chunk_id</text>
+
+  <rect class="step" x="640" y="295" width="130" height="90" rx="8"/>
+  <text class="t" x="705" y="330" text-anchor="middle">Build prompt</text>
+  <text class="s" x="705" y="350" text-anchor="middle">context + question</text>
+
+  <rect class="ext" x="790" y="295" width="130" height="90" rx="8"/>
+  <text class="t" x="855" y="322" text-anchor="middle">Ollama ×2</text>
+  <text class="s" x="855" y="342" text-anchor="middle">RAG answer</text>
+  <text class="s" x="855" y="359" text-anchor="middle">LLM-only answer</text>
+
+  <rect class="ext" x="490" y="425" width="280" height="80" rx="8"/>
+  <text class="t" x="630" y="455" text-anchor="middle">Similarity</text>
+  <text class="s" x="630" y="475" text-anchor="middle">embed both answers and each source,</text>
+  <text class="s" x="630" y="492" text-anchor="middle">cosine similarity per source chunk</text>
+
+  <rect class="step" x="190" y="425" width="280" height="80" rx="8"/>
+  <text class="t" x="330" y="455" text-anchor="middle">Response → UI</text>
+  <text class="s" x="330" y="475" text-anchor="middle">answers side by side, sources,</text>
+  <text class="s" x="330" y="492" text-anchor="middle">bar chart (Chart.js)</text>
+
+  <path class="edge" d="M170,340 L190,340" marker-end="url(#a)"/>
+  <path class="edge" d="M320,340 L340,340" marker-end="url(#a)"/>
+  <path class="edge" d="M470,340 L490,340" marker-end="url(#a)"/>
+  <path class="edge" d="M620,340 L640,340" marker-end="url(#a)"/>
+  <path class="edge" d="M770,340 L790,340" marker-end="url(#a)"/>
+  <path class="edge" d="M855,385 L855,465 L770,465" marker-end="url(#a)"/>
+  <path class="edge" d="M490,465 L470,465" marker-end="url(#a)"/>
+</svg>

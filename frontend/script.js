@@ -1,4 +1,20 @@
-const API_BASE_URL = 'http://localhost:8000'; // 与 FastAPI 后端地址一致
+// When the page is served by the backend (http://127.0.0.1:8000/), call the API on the same origin.
+// When the page is opened as a local file, fall back to the default backend address.
+const API_BASE_URL = window.location.protocol.startsWith('http')
+    ? window.location.origin
+    : 'http://localhost:8000';
+
+// Optional API key. Only needed when the backend sets SIMPLE_RAG_API_KEY.
+const apiKeyInput = document.getElementById('apiKeyInput');
+if (apiKeyInput) {
+    apiKeyInput.value = sessionStorage.getItem('simpleRagApiKey') || '';
+    apiKeyInput.addEventListener('change', () => sessionStorage.setItem('simpleRagApiKey', apiKeyInput.value.trim()));
+}
+
+function authHeaders(extra = {}) {
+    const key = apiKeyInput ? apiKeyInput.value.trim() : '';
+    return key ? { ...extra, 'X-API-Key': key } : extra;
+}
 
 const fileInput = document.getElementById('fileInput');
 const uploadStatus = document.getElementById('uploadStatus');
@@ -48,6 +64,7 @@ async function uploadFile() {
     try {
         const response = await fetch(`${API_BASE_URL}/upload/`, {
             method: 'POST',
+            headers: authHeaders(),
             body: formData, // FormData 会自动设置正确的 Content-Type for multipart/form-data
         });
 
@@ -111,9 +128,9 @@ async function submitQuestion() {
     try {
         const response = await fetch(`${API_BASE_URL}/query/`, {
             method: 'POST',
-            headers: {
+            headers: authHeaders({
                 'Content-Type': 'application/json',
-            },
+            }),
             body: JSON.stringify({ question: question, top_k: topK }),
         });
 
@@ -157,7 +174,10 @@ async function submitQuestion() {
             }
 
         } else {
-            displayError(`查询失败: ${result.detail || response.statusText}`);
+            const detail = Array.isArray(result.detail)
+                ? result.detail.map(d => d.msg).join('; ')
+                : (result.detail || response.statusText);
+            displayError(`查询失败: ${detail}`);
             ragAnswerDiv.textContent = '查询出错。';
             llmOnlyAnswerDiv.textContent = '查询出错。';
         }
