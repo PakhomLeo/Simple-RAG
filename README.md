@@ -11,6 +11,10 @@ A bar chart shows how close each answer is to each source chunk.
 - **Frontend:** plain HTML, CSS and JavaScript, Chart.js
 - **License:** [MIT](LICENSE)
 
+![Simple RAG web UI: a question, the answer with retrieved context, the answer without context, and the similarity chart](docs/assets/screenshot.png)
+
+*The UI running against the offline fake services (`scripts/fake_services.py`), so the answers are canned.*
+
 ![Architecture](docs/assets/architecture.svg)
 
 ## Features
@@ -26,8 +30,9 @@ A bar chart shows how close each answer is to each source chunk.
 - The LLM runs in Ollama (default `qwen3:4b`). `<think>…</think>` blocks are removed from answers.
 - The response contains the RAG answer, the LLM-only answer, the source chunks, and the cosine
   similarity between each answer and each source chunk. The UI plots the squared similarity.
-- Every upload **replaces** the previous vectors: the Milvus collection is dropped before the new batch.
-  Rows in SQLite are kept (see [Known limitations](#known-limitations)).
+- Every upload **replaces** the previous index: before the new batch is processed, the Milvus collection
+  is dropped and all chunk rows are deleted from SQLite, so both stores always hold the same documents.
+  If Milvus cannot be cleared, the upload stops with an error and SQLite is left unchanged.
 
 ![Upload and query flow](docs/assets/flow.svg)
 
@@ -73,6 +78,9 @@ python -m backend.main
 Open <http://127.0.0.1:8000/>. The backend serves the UI on the same origin.
 The interactive API docs are at <http://127.0.0.1:8000/docs>.
 
+> **Always open the UI through the backend at `/`.** Opening `frontend/index.html` directly from disk
+> (`file://`) is not supported: the browser blocks the API calls.
+
 ### Try it without any key or model
 
 `scripts/fake_services.py` is a fake embedding API plus a fake Ollama. It returns deterministic
@@ -90,7 +98,8 @@ export MILVUS_DIMENSION=64
 python -m backend.main
 ```
 
-Then upload `examples/sample.md` in the UI and ask a question.
+Then open <http://127.0.0.1:8000/>, upload `examples/sample.md` (English) or `examples/sample.zh-CN.md`
+(Chinese), and ask a question. Each sample ends with a few questions to try.
 
 ## Configuration
 
@@ -114,6 +123,7 @@ See [`.env.example`](.env.example) for the full list.
 | `CHUNK_SIZE` / `CHUNK_OVERLAP` | `200` / `50` | Chunking, in characters |
 | `SQLITE_DATABASE_URL` | `sqlite:///./rag_sqlite.db` | Chunk text store |
 | `FASTAPI_HOST` / `FASTAPI_PORT` | `127.0.0.1` / `8000` | Used by `python -m backend.main` |
+| `SIMPLE_RAG_BIND_HOST` | *(empty)* | Listen address for the startup check when it cannot be detected (see [Security notes](#security-notes)) |
 | `SERVE_FRONTEND` | `true` | Serve `frontend/` at `/` |
 | `SIMPLE_RAG_API_KEY` | *(empty)* | If set, `/upload/` and `/query/` need header `X-API-Key` |
 | `CORS_ALLOW_ORIGINS` | `http://localhost:8000,http://127.0.0.1:8000` | Browser origins allowed by CORS |
@@ -142,14 +152,16 @@ When `SIMPLE_RAG_API_KEY` is set, add `-H "X-API-Key: <key>"`. The UI has an opt
 
 ## Security notes
 
-- The server binds to `127.0.0.1` by default. `python -m backend.main` refuses a non-loopback
-  `FASTAPI_HOST` unless `SIMPLE_RAG_API_KEY` is set. If you run `uvicorn --host 0.0.0.0` yourself,
-  set the key first.
-- Any client that can reach `/upload/` can wipe the vector collection. Use the API key whenever
+- The API key is off by default and the server binds to `127.0.0.1`. At startup the app checks the
+  listen address: it **refuses to start** on a non-loopback address (for example `0.0.0.0`) when
+  `SIMPLE_RAG_API_KEY` is not set. The check covers `python -m backend.main` and
+  `uvicorn backend.main:app --host …` (including `UVICORN_HOST`). Under other launchers, such as gunicorn
+  or your own `uvicorn.run(...)`, the address cannot be detected and the app logs a prominent
+  `SECURITY WARNING` instead; set `SIMPLE_RAG_BIND_HOST` to the address you bind to enable the check there.
+- Any client that can reach `/upload/` can replace the whole index. Use the API key whenever
   other people can reach the server.
-- Uploaded documents are inserted into the LLM prompt as-is. A document can contain instructions that
-  steer the answer (prompt injection). The LLM has no tools and cannot read or change anything else,
-  but do not treat answers as trusted when documents come from untrusted sources.
+- Uploaded documents are inserted into the LLM prompt as-is, so a document can steer the answer
+  (prompt injection). The LLM has no tools, so this only affects the answer text. See [SECURITY.md](SECURITY.md).
 - The embedding API key is sent only to `EMBEDDING_API_URL` and is never logged.
 - See [SECURITY.md](SECURITY.md) to report a vulnerability.
 
@@ -167,9 +179,8 @@ frontend/        index.html, script.js, style.css
 scripts/
   fake_services.py   fake embedding API + fake Ollama for demos and tests
 tests/           pytest suite (uses the fake services and Milvus Lite)
-examples/        sample.md
-Markdown/        sample documents from the original project (see note below)
-docs/assets/     architecture and flow diagrams
+examples/        sample.md (English), sample.zh-CN.md (Chinese)
+docs/assets/     architecture and flow diagrams, UI screenshot
 ```
 
 ## Development
@@ -186,8 +197,7 @@ so they need no network, no key and no model. See [CONTRIBUTING.md](CONTRIBUTING
 
 ## Known limitations
 
-- An upload drops the Milvus collection but does not clear SQLite, so old chunk text stays in
-  `rag_sqlite.db`. Delete the file to remove it.
+- There is one index per server. Each upload replaces it; you cannot add documents to an existing index.
 - The backend uses the ORM-style pymilvus API, which pymilvus 3.1 removes, so `requirements.txt`
   pins `pymilvus<3.1`.
 - Chunking is by character count, not by sentence or heading.
@@ -195,9 +205,8 @@ so they need no network, no key and no model. See [CONTRIBUTING.md](CONTRIBUTING
 
 ## Sample documents
 
-`examples/sample.md` is written for this project and is MIT licensed like the rest of the code.
-The files in `Markdown/` were collected from third-party public sources for testing. They are not
-covered by this project's license and remain the property of their authors.
+`examples/sample.md` and `examples/sample.zh-CN.md` are written for this project and are MIT licensed
+like the rest of the code.
 
 ## License
 

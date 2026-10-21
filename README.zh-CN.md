@@ -10,6 +10,10 @@
 - **前端：** 原生 HTML、CSS、JavaScript，Chart.js
 - **许可证：** [MIT](LICENSE)
 
+![Simple RAG 网页界面：提问、带检索上下文的答案、无上下文的答案和相似度图表](docs/assets/screenshot.png)
+
+*截图连接的是离线假服务（`scripts/fake_services.py`），所以答案是固定格式的。*
+
 ![架构图](docs/assets/architecture.svg)
 
 ## 功能
@@ -24,8 +28,8 @@
 - 大模型运行在 Ollama 上（默认 `qwen3:4b`），答案中的 `<think>…</think>` 会被去掉。
 - 返回结果包括 RAG 答案、纯 LLM 答案、引用来源，以及每个答案与每个来源之间的余弦相似度。
   页面上画的是相似度的平方。
-- 每次上传都会**替换**之前的向量：处理新文件前会先删除整个 Milvus 集合。
-  SQLite 中的记录不会删除（见[已知限制](#已知限制)）。
+- 每次上传都会**替换**之前的索引：处理新文件前，先删除整个 Milvus 集合，再删除 SQLite 中的全部文本块，
+  两边始终保存同一批文档。如果 Milvus 清空失败，上传会报错终止，SQLite 保持不变。
 
 ![上传与问答流程](docs/assets/flow.svg)
 
@@ -70,6 +74,9 @@ python -m backend.main
 
 打开 <http://127.0.0.1:8000/>。界面由后端同源提供，交互式 API 文档在 <http://127.0.0.1:8000/docs>。
 
+> **请始终通过后端提供的 `/` 打开界面。** 不支持直接从磁盘打开 `frontend/index.html`（`file://`），
+> 浏览器会拦截对 API 的请求。
+
 ### 不用任何 key 和模型试一试
 
 `scripts/fake_services.py` 是一个假的 Embedding 接口加假的 Ollama，返回确定性的向量和固定格式的答案，
@@ -87,7 +94,8 @@ export MILVUS_DIMENSION=64
 python -m backend.main
 ```
 
-然后在页面上上传 `examples/sample.md` 并提问。
+然后打开 <http://127.0.0.1:8000/>，上传 `examples/sample.zh-CN.md`（中文）或 `examples/sample.md`（英文）并提问。
+每篇示例文末都列了几个可以试问的问题。
 
 ## 配置项
 
@@ -110,6 +118,7 @@ python -m backend.main
 | `CHUNK_SIZE` / `CHUNK_OVERLAP` | `200` / `50` | 切块参数（字符数） |
 | `SQLITE_DATABASE_URL` | `sqlite:///./rag_sqlite.db` | 存原文的 SQLite |
 | `FASTAPI_HOST` / `FASTAPI_PORT` | `127.0.0.1` / `8000` | `python -m backend.main` 使用 |
+| `SIMPLE_RAG_BIND_HOST` | *（空）* | 无法自动识别监听地址时，告诉启动检查实际绑定的地址（见[安全说明](#安全说明)） |
 | `SERVE_FRONTEND` | `true` | 在 `/` 提供 `frontend/` 页面 |
 | `SIMPLE_RAG_API_KEY` | *（空）* | 设置后 `/upload/` 和 `/query/` 需要 `X-API-Key` 请求头 |
 | `CORS_ALLOW_ORIGINS` | `http://localhost:8000,http://127.0.0.1:8000` | CORS 允许的浏览器来源 |
@@ -138,11 +147,14 @@ curl -H 'Content-Type: application/json' \
 
 ## 安全说明
 
-- 服务默认只监听 `127.0.0.1`。用 `python -m backend.main` 启动时，如果 `FASTAPI_HOST` 不是回环地址且没有设置
-  `SIMPLE_RAG_API_KEY`，程序会拒绝启动。自己用 `uvicorn --host 0.0.0.0` 启动时不会做这个检查，请先设置 key。
-- 任何能访问 `/upload/` 的人都能清空向量集合。只要别人能访问到服务，就请启用 API key。
-- 上传的文档会原样放进提示词。文档里可以夹带指令来左右答案（提示注入）。模型没有任何工具，读不到也改不了别的东西，
-  但如果文档来源不可信，请不要直接信任答案。
+- API key 默认关闭，服务默认只监听 `127.0.0.1`。应用启动时会检查监听地址：如果绑定的是非回环地址（例如 `0.0.0.0`）
+  又没有设置 `SIMPLE_RAG_API_KEY`，会**拒绝启动**。这个检查覆盖 `python -m backend.main` 和
+  `uvicorn backend.main:app --host …`（包括 `UVICORN_HOST`）。用其他方式启动时（例如 gunicorn 或自己调用
+  `uvicorn.run(...)`），程序识别不到监听地址，只会打印一条醒目的 `SECURITY WARNING`；这时可以把实际绑定的地址
+  写进 `SIMPLE_RAG_BIND_HOST` 来启用检查。
+- 任何能访问 `/upload/` 的人都能替换整个索引。只要别人能访问到服务，就请启用 API key。
+- 上传的文档会原样放进提示词，文档里的内容可以左右答案（提示注入）。模型没有任何工具，所以影响只限于答案文本。
+  详见 [SECURITY.md](SECURITY.md)。
 - Embedding API key 只发给 `EMBEDDING_API_URL`，不会写进日志。
 - 报告漏洞请看 [SECURITY.md](SECURITY.md)。
 
@@ -160,9 +172,8 @@ frontend/        index.html、script.js、style.css
 scripts/
   fake_services.py   用于演示和测试的假 Embedding 接口 + 假 Ollama
 tests/           pytest 测试（使用假服务和 Milvus Lite）
-examples/        sample.md
-Markdown/        原项目附带的示例文档（见下文说明）
-docs/assets/     架构图和流程图
+examples/        sample.md（英文）、sample.zh-CN.md（中文）
+docs/assets/     架构图、流程图和界面截图
 ```
 
 ## 开发
@@ -179,15 +190,14 @@ pytest
 
 ## 已知限制
 
-- 上传时只删除 Milvus 集合，不清空 SQLite，旧文本块会一直留在 `rag_sqlite.db` 里，需要时请手动删除该文件。
+- 每个服务只有一个索引，每次上传都会替换它，不能往已有索引里追加文档。
 - 后端使用 pymilvus 的 ORM 风格接口，pymilvus 3.1 会移除这套接口，所以 `requirements.txt` 限定了 `pymilvus<3.1`。
 - 切块按字符数进行，不按句子或标题。
 - Chart.js 从 jsDelivr 加载（固定版本并带 Subresource Integrity 校验），所以图表需要联网。
 
 ## 示例文档
 
-`examples/sample.md` 是为本项目编写的，和代码一样采用 MIT 许可证。
-`Markdown/` 目录下的文件收集自第三方公开来源，仅用于测试，不在本项目许可证范围内，版权归原作者所有。
+`examples/sample.md` 和 `examples/sample.zh-CN.md` 是为本项目编写的，和代码一样采用 MIT 许可证。
 
 ## 许可证
 

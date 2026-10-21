@@ -1,6 +1,6 @@
 <svg xmlns="http://www.w3.org/2000/svg" width="960" height="560" viewBox="0 0 960 560" role="img" aria-labelledby="title desc" font-family="Inter, Segoe UI, Helvetica, Arial, sans-serif">
   <title id="title">Simple RAG upload and query flow</title>
-  <desc id="desc">Upload: clear Milvus, parse Markdown, split into chunks, save to SQLite, embed, insert into Milvus. Query: embed question, search Top-K, filter by distance, load text from SQLite, build prompt, ask the LLM with and without context, compute similarity, return.</desc>
+  <desc id="desc">Upload: clear Milvus and SQLite, parse Markdown, split into chunks, save to SQLite, embed, insert into Milvus. Query: embed question, search Top-K, filter by distance, load text from SQLite, build prompt, ask the LLM with and without context, compute similarity, return.</desc>
   <style>
     .bg { fill: #ffffff; }
     .step { fill: #f6f8fa; stroke: #57606a; stroke-width: 1.4; }
@@ -35,8 +35,8 @@
   <text class="h" x="40" y="50">1 · Upload (POST /upload/)</text>
   <g>
     <rect class="step" x="40" y="80" width="130" height="90" rx="8"/>
-    <text class="t" x="105" y="115" text-anchor="middle">Clear Milvus</text>
-    <text class="s" x="105" y="135" text-anchor="middle">drop collection</text>
+    <text class="t" x="105" y="115" text-anchor="middle">Clear stores</text>
+    <text class="s" x="105" y="135" text-anchor="middle">Milvus + SQLite</text>
     <text class="s" x="105" y="152" text-anchor="middle">(once per batch)</text>
 
     <rect class="step" x="190" y="80" width="130" height="90" rx="8"/>
