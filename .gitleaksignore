@@ -1,3 +1,3 @@
-# False positives: placeholder test API key in commit 6f7a32c (replaced in 941977e).
-6f7a32c871ed7bb50b3a6c816e0d3cdbbb577975:tests/test_api.py:generic-api-key:99
-6f7a32c871ed7bb50b3a6c816e0d3cdbbb577975:tests/test_api.py:generic-api-key:103
+# False positives: placeholder test API key in commit c6af535 (replaced in a372abc).
+c6af5355f6f38d8d6a45391bd30dc9cf9efcbe7b:tests/test_api.py:generic-api-key:99
+c6af5355f6f38d8d6a45391bd30dc9cf9efcbe7b:tests/test_api.py:generic-api-key:103
