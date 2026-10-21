@@ -31,6 +31,11 @@ const similarityChartCanvas = document.getElementById('similarityChart');
 const similarityInfo = document.getElementById('similarityInfo');
 let similarityChartInstance = null; // 用于存储图表实例，方便更新或销毁
 
+// Same rule as the backend: the name ends in .md, in any case (notes.md, NOTES.MD, Readme.Md).
+function isMarkdownFile(name) {
+    return name.toLowerCase().endsWith('.md');
+}
+
 async function uploadFile() {
     clearMessages();
     if (!fileInput.files || fileInput.files.length === 0) { // 检查是否有文件被选择
@@ -44,7 +49,7 @@ async function uploadFile() {
 
     for (let i = 0; i < files.length; i++) {
         const file = files[i];
-        if (file.name.endsWith('.md')) {
+        if (isMarkdownFile(file.name)) {
             formData.append('files', file); // 使用相同的键 'files' 来追加所有文件
             hasValidMdFile = true;
         } else {

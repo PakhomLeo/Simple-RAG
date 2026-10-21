@@ -464,3 +464,13 @@ def test_rag_sources_order_with_real_search(client, app_module, monkeypatch):
     distances = [h["distance"] for h in seen["hits"]]
     assert distances == sorted(distances)
     assert [s["chunk_id"] for s in body["rag_sources"]] == [h["chunk_id"] for h in seen["hits"]]
+
+
+# --- .md in any case ------------------------------------------------------------------------
+
+
+def test_upload_accepts_md_extension_in_any_case(client, app_module):
+    r = client.post("/upload/", files=[_md("NOTES.MD", "upper case name. " * 20), _md("Readme.Md", "mixed. " * 20)])
+    assert r.status_code == 200, r.text
+    assert [item["total_chunks"] > 0 for item in r.json()] == [True, True]
+    assert _index_state(app_module)[1] == {"NOTES.MD", "Readme.Md"}
