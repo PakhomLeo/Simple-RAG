@@ -50,6 +50,10 @@ def split_text_into_chunks(text: str, chunk_size: int = CHUNK_SIZE, chunk_overla
     Returns:
         一个包含切分后文本块的列表。
     """
+    if chunk_size < 1:
+        raise ValueError(f"chunk_size must be at least 1, got {chunk_size}.")
+    if not 0 <= chunk_overlap < chunk_size:
+        raise ValueError(f"chunk_overlap must be at least 0 and smaller than chunk_size, got {chunk_overlap}.")
     if not text:
         return []
 
