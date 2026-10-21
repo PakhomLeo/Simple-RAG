@@ -294,3 +294,71 @@ def test_upload_with_one_valid_file_replaces_index_and_reports_the_rest(client, 
     assert [item["filename"] for item in r.json()] == ["skip.txt", "new.md"]
     count, names, vectors = _index_state(app_module)
     assert names == {"new.md"} and vectors == count
+
+
+# --- A failed file leaves no chunks in SQLite -----------------------------------------------
+
+
+def test_embedding_failure_rolls_back_sqlite(client, app_module, monkeypatch):
+    """Regression: chunks were committed to SQLite before the embedding call, so a failed embedding left
+    chunks without vectors."""
+    real = app_module.services.get_embeddings
+
+    def fail_for_bad(texts):
+        if any("BAD" in t for t in texts):
+            raise ValueError("Embedding API request failed: boom")
+        return real(texts)
+
+    monkeypatch.setattr(app_module.services, "get_embeddings", fail_for_bad)
+    r = client.post("/upload/", files=[_md("bad.md", "BAD content. " * 30), _md("good.md", "good content. " * 30)])
+    assert r.status_code == 200, r.text
+    bad, good = r.json()
+    assert bad["total_chunks"] == 0 and good["total_chunks"] > 0
+    count, names, vectors = _index_state(app_module)
+    assert names == {"good.md"}
+    assert count == vectors == good["total_chunks"]
+
+
+def test_embedding_count_mismatch_rolls_back_sqlite(client, app_module, monkeypatch):
+    monkeypatch.setattr(app_module.services, "get_embeddings", lambda texts: [[0.0] * 32])
+    r = client.post("/upload/", files=[_md("many.md", "many chunks here. " * 40)])
+    assert r.status_code == 200, r.text
+    assert r.json()[0]["message"] == "Embedding generation failed or count mismatch."
+    assert _index_state(app_module) == (0, set(), 0)
+
+
+def test_milvus_insert_failure_rolls_back_sqlite(client, app_module, monkeypatch):
+    def fail(*a, **k):
+        raise RuntimeError("Milvus insertion failed: disk full")
+
+    monkeypatch.setattr(app_module.services, "insert_into_milvus", fail)
+    r = client.post("/upload/", files=[_md("doc.md", "some content. " * 30)])
+    assert r.status_code == 200, r.text
+    assert r.json()[0]["total_chunks"] == 0
+    assert _index_state(app_module) == (0, set(), 0)
+
+
+def test_sqlite_commit_failure_removes_inserted_vectors(client, app_module, monkeypatch):
+    """If SQLite cannot commit after the vectors were inserted, the vectors are deleted again."""
+    from sqlalchemy.orm import Session
+
+    real_commit = Session.commit
+    real_insert = app_module.services.insert_into_milvus
+    state = {"inserted": False}
+
+    def insert(ids, embeddings):
+        real_insert(ids, embeddings)
+        state["inserted"] = True
+
+    def commit(self):
+        if state["inserted"]:
+            state["inserted"] = False
+            raise RuntimeError("database is locked")
+        return real_commit(self)
+
+    monkeypatch.setattr(app_module.services, "insert_into_milvus", insert)
+    monkeypatch.setattr(Session, "commit", commit)
+    r = client.post("/upload/", files=[_md("doc.md", "some content. " * 30)])
+    assert r.status_code == 200, r.text
+    assert r.json()[0]["total_chunks"] == 0
+    assert _index_state(app_module) == (0, set(), 0)

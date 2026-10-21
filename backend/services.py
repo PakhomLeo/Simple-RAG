@@ -1,3 +1,4 @@
+import json
 import logging
 import os
 import re  # <--- 添加导入 re 模块
@@ -296,6 +297,22 @@ def insert_into_milvus(chunk_ids: List[str], embeddings: List[List[float]]):
     except Exception as e:
         logger.error(f"Error inserting data into Milvus: {e}")
         raise RuntimeError(f"Milvus insertion failed: {e}")
+
+
+def delete_from_milvus(chunk_ids: List[str]) -> None:
+    """Delete the vectors with these chunk ids. Used to undo an insert when SQLite cannot be committed."""
+    if not chunk_ids:
+        return
+    collection = get_milvus_collection()
+    alias = _get_milvus_connection_alias()
+    id_list = ", ".join(json.dumps(chunk_id) for chunk_id in chunk_ids)
+    try:
+        collection.delete(expr=f"{MILVUS_ID_FIELD_NAME} in [{id_list}]")
+        collection.flush(using=alias)
+        logger.info(f"Deleted {len(chunk_ids)} vectors from Milvus.")
+    except Exception as e:
+        logger.error(f"Error deleting vectors from Milvus: {e}")
+        raise RuntimeError(f"Milvus delete failed: {e}") from e
 
 
 def search_in_milvus(query_embedding: List[float], top_k: int) -> List[Dict[str, Any]]:

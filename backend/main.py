@@ -266,24 +266,29 @@ async def _check_upload_file(file: UploadFile, display_name: str) -> Tuple[Optio
 
 
 def _store_chunks(db: Session, display_name: str, chunks: List[str]) -> DocumentUploadResponse:
-    """Save the chunks of one file to SQLite, embed them and insert the vectors into Milvus."""
+    """Save the chunks of one file to SQLite, embed them and insert the vectors into Milvus.
+
+    The chunks are only committed to SQLite after the vectors are in Milvus. On any failure the SQLite
+    transaction is rolled back (and vectors that were already inserted are deleted again), so a file is
+    either in both stores or in neither."""
+    inserted_ids: List[str] = []
     try:
-        chunk_ids_in_db = []
-        for chunk_text in chunks:
-            db_chunk = crud.create_chunk(db, chunk_content=chunk_text, document_name=display_name)
-            chunk_ids_in_db.append(db_chunk.chunk_id)
-        logger.info(f"Stored {len(chunk_ids_in_db)} chunks metadata in SQLite.")
+        chunk_ids_in_db = crud.add_chunks(db, chunks, display_name)
+        logger.info(f"Added {len(chunk_ids_in_db)} chunks to the SQLite transaction.")
 
         logger.info(f"Requesting embeddings for {len(chunks)} chunks.")
         embeddings = services.get_embeddings(chunks)
         if len(embeddings) != len(chunk_ids_in_db):
             logger.error("Mismatch between number of embeddings and stored chunks.")
+            db.rollback()
             return DocumentUploadResponse(
                 filename=display_name, message="Embedding generation failed or count mismatch.", total_chunks=0
             )
 
         services.insert_into_milvus(chunk_ids_in_db, embeddings)
+        inserted_ids = chunk_ids_in_db
         logger.info(f"Successfully inserted embeddings into Milvus for file: {display_name}")
+        db.commit()
         return DocumentUploadResponse(
             filename=display_name, message="Document processed and stored successfully.", total_chunks=len(chunks)
         )
@@ -299,7 +304,25 @@ def _store_chunks(db: Session, display_name: str, chunks: List[str]) -> Document
     except Exception as e:
         logger.error(f"Unexpected error during document upload for {display_name}: {e}", exc_info=True)
         message = "An unexpected error occurred. See the server log for details."
+    _undo_file(db, display_name, inserted_ids)
     return DocumentUploadResponse(filename=display_name, message=message, total_chunks=0)
+
+
+def _undo_file(db: Session, display_name: str, inserted_ids: List[str]) -> None:
+    """Roll back the SQLite chunks of a failed file and delete vectors that were already inserted."""
+    try:
+        db.rollback()
+    except Exception as e:
+        logger.error(f"Rolling back SQLite for {display_name!r} failed: {e}", exc_info=True)
+    if inserted_ids:
+        try:
+            services.delete_from_milvus(inserted_ids)
+        except Exception as e:
+            logger.error(
+                f"Could not delete {len(inserted_ids)} vectors of {display_name!r} from Milvus after a failed "
+                f"commit; they have no chunk in SQLite and are ignored at query time: {e}",
+                exc_info=True,
+            )
 
 
 @app.post(

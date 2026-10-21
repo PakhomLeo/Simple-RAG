@@ -21,6 +21,25 @@ def create_chunk(db: Session, chunk_content: str, document_name: str) -> databas
     return db_chunk
 
 
+def add_chunks(db: Session, chunk_contents: List[str], document_name: str) -> List[str]:
+    """Add the chunks of one document to the session without committing. Returns their ids.
+
+    The caller commits once the vectors are in Milvus, or rolls back, so SQLite never keeps chunks
+    that have no vector."""
+    now = datetime.datetime.utcnow()
+    ids = []
+    for content in chunk_contents:
+        chunk_id = str(uuid.uuid4())
+        db.add(
+            database.ChunkDB(
+                chunk_id=chunk_id, original_content=content, source_document_name=document_name, upload_timestamp=now
+            )
+        )
+        ids.append(chunk_id)
+    db.flush()
+    return ids
+
+
 def get_chunk_by_id(db: Session, chunk_id: str) -> Optional[database.ChunkDB]:
     return db.query(database.ChunkDB).filter(database.ChunkDB.chunk_id == chunk_id).first()
 
