@@ -47,10 +47,15 @@ def test_upload_strips_directory_from_filename(client):
 
 def test_upload_rejects_oversized_file(client, app_module, monkeypatch):
     monkeypatch.setattr(app_module, "MAX_UPLOAD_FILE_BYTES", 100)
-    r = client.post("/upload/", files=[_md("big.md", "x" * 101)])
+    r = client.post("/upload/", files=[_md("big.md", "x" * 101), _md("ok.md", "small enough")])
     assert r.status_code == 200
     assert r.json()[0]["message"].startswith("Skipped: file is larger")
     assert r.json()[0]["total_chunks"] == 0
+    assert r.json()[1]["total_chunks"] == 1
+    # Alone, the oversized file leaves no valid file: 400 and the index is kept.
+    r = client.post("/upload/", files=[_md("big.md", "x" * 101)])
+    assert r.status_code == 400
+    assert "big.md: Skipped: file is larger" in r.json()["detail"]
 
 
 def test_upload_rejects_too_many_files(client, app_module, monkeypatch):
@@ -60,9 +65,15 @@ def test_upload_rejects_too_many_files(client, app_module, monkeypatch):
 
 
 def test_upload_non_utf8_is_reported_not_crashing(client):
-    r = client.post("/upload/", files=[("files", ("bad.md", b"\xff\xfe\xfa", "text/markdown"))])
+    r = client.post(
+        "/upload/", files=[("files", ("bad.md", b"\xff\xfe\xfa", "text/markdown")), _md("ok.md", "hello world")]
+    )
     assert r.status_code == 200
     assert r.json()[0]["total_chunks"] == 0
+    assert r.json()[0]["message"].startswith("Error processing document")
+    r = client.post("/upload/", files=[("files", ("bad.md", b"\xff\xfe\xfa", "text/markdown"))])
+    assert r.status_code == 400
+    assert "bad.md: Error processing document" in r.json()["detail"]
 
 
 @pytest.mark.parametrize("top_k", [0, -1, 51, 10_000])
@@ -240,3 +251,46 @@ def test_lifespan_refuses_to_start_on_public_address(app_module, monkeypatch):
     monkeypatch.setattr(app_module, "SIMPLE_RAG_API_KEY", "k")
     with TestClient(app_module.app) as c:
         assert c.get("/health").status_code == 200
+
+
+# --- Files are checked before the index is cleared -------------------------------------------
+
+
+def _index_state(app_module):
+    count, names = _chunk_count(app_module)
+    return count, names, app_module.services.get_milvus_collection().num_entities
+
+
+def test_upload_without_valid_files_keeps_index(client, app_module, monkeypatch):
+    """Regression: the index was cleared before the files were checked, so an upload of only invalid
+    files left an empty index."""
+    r = client.post("/upload/", files=[_md("keep.md", "keep this index please. " * 20)])
+    assert r.status_code == 200, r.text
+    before = _index_state(app_module)
+    assert before[0] > 0 and before[2] == before[0]
+
+    monkeypatch.setattr(app_module, "MAX_UPLOAD_FILE_BYTES", 1000)
+    r = client.post(
+        "/upload/",
+        files=[
+            _md("notes.txt", "not markdown"),
+            _md("empty.md", ""),
+            ("files", ("latin1.md", b"\xff\xfe\xfa", "text/markdown")),
+            _md("big.md", "x" * 1001),
+        ],
+    )
+    assert r.status_code == 400, r.text
+    detail = r.json()["detail"]
+    assert detail.startswith("No valid .md files in the upload; the index was not changed.")
+    for name in ("notes.txt", "empty.md", "latin1.md", "big.md"):
+        assert name in detail
+    assert _index_state(app_module) == before
+
+
+def test_upload_with_one_valid_file_replaces_index_and_reports_the_rest(client, app_module):
+    client.post("/upload/", files=[_md("old.md", "old content here. " * 20)])
+    r = client.post("/upload/", files=[_md("skip.txt", "nope"), _md("new.md", "new content here. " * 20)])
+    assert r.status_code == 200, r.text
+    assert [item["filename"] for item in r.json()] == ["skip.txt", "new.md"]
+    count, names, vectors = _index_state(app_module)
+    assert names == {"new.md"} and vectors == count

@@ -180,20 +180,41 @@ def get_db():
 @app.post(
     "/upload/",
     response_model=List[DocumentUploadResponse],
-    responses={500: {"model": ErrorResponse}},
+    responses={400: {"model": ErrorResponse}, 500: {"model": ErrorResponse}},
     dependencies=[Depends(require_api_key)],
 )
 async def upload_document(files: List[UploadFile] = File(...), db: Session = Depends(get_db)):
     """
     上传一个或多个 Markdown 文档，处理并存储。
     """
-    processed_files_responses = []  # 用于存储每个文件的处理结果
-
     if len(files) > MAX_UPLOAD_FILES:
         raise HTTPException(status_code=413, detail=f"Too many files. At most {MAX_UPLOAD_FILES} files per upload.")
 
-    # Every upload replaces the whole index: clear Milvus first, then SQLite, so both stores stay in sync.
-    # If Milvus cannot be cleared, nothing is deleted from SQLite and the upload is aborted.
+    # Step 1: read and check every file before anything is changed. A file is valid when its name ends in
+    # .md, it is within the size limit, it is UTF-8 and it yields at least one chunk.
+    results: List[Optional[DocumentUploadResponse]] = []  # one entry per file, in request order
+    valid_files: List[Tuple[int, str, List[str]]] = []  # (position in results, display name, chunks)
+    for file in files:
+        display_name = _safe_display_name(file.filename)
+        try:
+            problem, chunks = await _check_upload_file(file, display_name)
+        finally:
+            await file.close()
+        if problem is not None:
+            results.append(DocumentUploadResponse(filename=display_name, message=problem, total_chunks=0))
+        else:
+            valid_files.append((len(results), display_name, chunks))
+            results.append(None)
+
+    if not valid_files:
+        reasons = " ".join(f"{item.filename}: {item.message}" for item in results if item is not None)
+        raise HTTPException(
+            status_code=400,
+            detail=f"No valid .md files in the upload; the index was not changed. {reasons}".strip(),
+        )
+
+    # Step 2: every upload replaces the whole index. Clear Milvus first, then SQLite, so both stores stay
+    # in sync. If Milvus cannot be cleared, nothing is deleted from SQLite and the upload is aborted.
     try:
         logger.info("Clearing existing vectors from Milvus before new upload batch...")
         services.clear_milvus_data()
@@ -209,134 +230,76 @@ async def upload_document(files: List[UploadFile] = File(...), db: Session = Dep
         logger.error(f"Error clearing SQLite chunks: {e}", exc_info=True)
         raise HTTPException(status_code=500, detail="Failed to clear the chunk store before upload.")
 
-    for file in files:  # 遍历文件列表
-        display_name = _safe_display_name(file.filename)
-        if not display_name.lower().endswith(".md"):
-            logger.warning(f"Skipping non-markdown file: {display_name!r}")
-            # 可以选择为跳过的文件添加一个特定的响应
-            processed_files_responses.append(
-                DocumentUploadResponse(
-                    filename=display_name,
-                    message="Skipped: Invalid file type. Only .md files are allowed.",
-                    total_chunks=0,
-                )
+    # Step 3: store each valid file. A failure is reported in that file's result.
+    for position, display_name, chunks in valid_files:
+        results[position] = _store_chunks(db, display_name, chunks)
+
+    return results
+
+
+async def _check_upload_file(file: UploadFile, display_name: str) -> Tuple[Optional[str], List[str]]:
+    """Read, decode, parse and chunk one uploaded file. Returns ``(problem, chunks)``; ``problem`` is the
+    message for the response when the file cannot be used, else ``None``."""
+    if not display_name.lower().endswith(".md"):
+        logger.warning(f"Skipping non-markdown file: {display_name!r}")
+        return "Skipped: Invalid file type. Only .md files are allowed.", []
+    contents = await file.read(MAX_UPLOAD_FILE_BYTES + 1)
+    if len(contents) > MAX_UPLOAD_FILE_BYTES:
+        return f"Skipped: file is larger than {MAX_UPLOAD_FILE_BYTES} bytes.", []
+    try:
+        text_content = contents.decode("utf-8")
+    except UnicodeDecodeError as e:
+        logger.warning(f"File {display_name!r} is not valid UTF-8: {e}")
+        return f"Error processing document (ValueError): {e}", []
+    try:
+        plain_text = services.parse_markdown_file(text_content)
+    except Exception as e:
+        logger.error(f"Could not parse {display_name!r}: {e}", exc_info=True)
+        return "An unexpected error occurred. See the server log for details.", []
+    logger.info(f"Parsed markdown file: {display_name}, length: {len(plain_text)}")
+    chunks = services.split_text_into_chunks(plain_text)
+    if not chunks:
+        logger.warning(f"No text chunks generated for file: {display_name}")
+        return "File content is empty or too short to be chunked.", []
+    logger.info(f"Split {display_name} into {len(chunks)} chunks.")
+    return None, chunks
+
+
+def _store_chunks(db: Session, display_name: str, chunks: List[str]) -> DocumentUploadResponse:
+    """Save the chunks of one file to SQLite, embed them and insert the vectors into Milvus."""
+    try:
+        chunk_ids_in_db = []
+        for chunk_text in chunks:
+            db_chunk = crud.create_chunk(db, chunk_content=chunk_text, document_name=display_name)
+            chunk_ids_in_db.append(db_chunk.chunk_id)
+        logger.info(f"Stored {len(chunk_ids_in_db)} chunks metadata in SQLite.")
+
+        logger.info(f"Requesting embeddings for {len(chunks)} chunks.")
+        embeddings = services.get_embeddings(chunks)
+        if len(embeddings) != len(chunk_ids_in_db):
+            logger.error("Mismatch between number of embeddings and stored chunks.")
+            return DocumentUploadResponse(
+                filename=display_name, message="Embedding generation failed or count mismatch.", total_chunks=0
             )
-            continue  # 继续处理下一个文件
 
-        try:
-            logger.info(f"Receiving and processing file: {display_name!r}")
-            contents = await file.read(MAX_UPLOAD_FILE_BYTES + 1)
-            if len(contents) > MAX_UPLOAD_FILE_BYTES:
-                processed_files_responses.append(
-                    DocumentUploadResponse(
-                        filename=display_name,
-                        message=f"Skipped: file is larger than {MAX_UPLOAD_FILE_BYTES} bytes.",
-                        total_chunks=0,
-                    )
-                )
-                continue
-            text_content = contents.decode("utf-8")
-
-            # 1. 解析 Markdown (如果需要复杂解析，否则直接用text_content)
-            # plain_text = services.parse_markdown_file(text_content) # 如果上面已是纯文本，则不需要
-            # 假设上传的是纯文本的md，或者简单处理，直接用 text_content
-            # 如果需要从markdown中提取特定结构（如标题），则需要更复杂的解析
-            plain_text = services.parse_markdown_file(text_content)  # 使用 services 中的解析函数
-            logger.info(f"Successfully parsed markdown file: {display_name}, length: {len(plain_text)}")
-
-            # 2. 文本切分
-            chunks = services.split_text_into_chunks(plain_text)
-            if not chunks:
-                logger.warning(f"No text chunks generated for file: {display_name}")
-                processed_files_responses.append(
-                    DocumentUploadResponse(
-                        filename=display_name,
-                        message="File content is empty or too short to be chunked.",
-                        total_chunks=0,
-                    )
-                )
-                continue
-            logger.info(f"Split document into {len(chunks)} chunks.")
-
-            # 3. 为每个块生成唯一ID，并存储元数据 (SQLite)
-            chunk_ids_in_db = []
-            chunk_contents_for_embedding = []
-            for chunk_text in chunks:
-                db_chunk = crud.create_chunk(db, chunk_content=chunk_text, document_name=display_name)
-                chunk_ids_in_db.append(db_chunk.chunk_id)
-                chunk_contents_for_embedding.append(chunk_text)
-            logger.info(f"Stored {len(chunk_ids_in_db)} chunks metadata in SQLite.")
-
-            # 4. 获取 Embedding
-            logger.info(f"Requesting embeddings for {len(chunk_contents_for_embedding)} chunks.")
-            embeddings = services.get_embeddings(chunk_contents_for_embedding)
-            if len(embeddings) != len(chunk_ids_in_db):
-                logger.error("Mismatch between number of embeddings and stored chunks.")
-                processed_files_responses.append(
-                    DocumentUploadResponse(
-                        filename=display_name, message="Embedding generation failed or count mismatch.", total_chunks=0
-                    )
-                )
-                continue
-            logger.info(f"Successfully received {len(embeddings)} embeddings.")
-
-            # 5. 存入 Milvus
-            services.insert_into_milvus(chunk_ids_in_db, embeddings)
-            logger.info(f"Successfully inserted embeddings into Milvus for file: {display_name}")
-
-            processed_files_responses.append(
-                DocumentUploadResponse(
-                    filename=display_name,
-                    message="Document processed and stored successfully.",
-                    total_chunks=len(chunks),
-                )
-            )
-        except ValueError as ve:
-            logger.error(f"ValueError during processing file {display_name}: {ve}", exc_info=True)
-            processed_files_responses.append(
-                DocumentUploadResponse(
-                    filename=display_name, message=f"Error processing document (ValueError): {str(ve)}", total_chunks=0
-                )
-            )
-        except ConnectionError as ce:  # 更具体的异常捕获
-            logger.error(f"ConnectionError during processing file {display_name}: {ce}", exc_info=True)
-            processed_files_responses.append(
-                DocumentUploadResponse(
-                    filename=display_name,
-                    message=f"Service connection error during processing: {str(ce)}",
-                    total_chunks=0,
-                )
-            )
-            # 如果一个文件的ConnectionError很严重，可能需要停止整个批处理
-            # raise HTTPException(status_code=503, detail=f"Service connection error processing {display_name}: {str(ce)}")
-        except RuntimeError as rte:
-            logger.error(f"RuntimeError during processing file {display_name}: {rte}", exc_info=True)
-            processed_files_responses.append(
-                DocumentUploadResponse(
-                    filename=display_name, message=f"Runtime error during processing: {str(rte)}", total_chunks=0
-                )
-            )
-        except HTTPException as http_exc:  # 如果内部抛出HTTPException，直接记录并添加到响应
-            logger.error(f"HTTPException for file {display_name}: {http_exc.detail}", exc_info=True)
-            processed_files_responses.append(
-                DocumentUploadResponse(filename=display_name, message=f"Error: {http_exc.detail}", total_chunks=0)
-            )
-        except Exception as e:
-            logger.error(f"Unexpected error during document upload for {display_name}: {e}", exc_info=True)
-            processed_files_responses.append(
-                DocumentUploadResponse(
-                    filename=display_name,
-                    message="An unexpected error occurred. See the server log for details.",
-                    total_chunks=0,
-                )
-            )
-        finally:
-            await file.close()
-
-    if not processed_files_responses:  # 如果没有选择任何文件或所有文件都被跳过
-        raise HTTPException(status_code=400, detail="No valid .md files were processed.")
-
-    return processed_files_responses  # 返回所有文件的处理结果列表
+        services.insert_into_milvus(chunk_ids_in_db, embeddings)
+        logger.info(f"Successfully inserted embeddings into Milvus for file: {display_name}")
+        return DocumentUploadResponse(
+            filename=display_name, message="Document processed and stored successfully.", total_chunks=len(chunks)
+        )
+    except ValueError as ve:
+        logger.error(f"ValueError during processing file {display_name}: {ve}", exc_info=True)
+        message = f"Error processing document (ValueError): {str(ve)}"
+    except ConnectionError as ce:
+        logger.error(f"ConnectionError during processing file {display_name}: {ce}", exc_info=True)
+        message = f"Service connection error during processing: {str(ce)}"
+    except RuntimeError as rte:
+        logger.error(f"RuntimeError during processing file {display_name}: {rte}", exc_info=True)
+        message = f"Runtime error during processing: {str(rte)}"
+    except Exception as e:
+        logger.error(f"Unexpected error during document upload for {display_name}: {e}", exc_info=True)
+        message = "An unexpected error occurred. See the server log for details."
+    return DocumentUploadResponse(filename=display_name, message=message, total_chunks=0)
 
 
 @app.post(
