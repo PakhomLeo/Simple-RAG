@@ -96,11 +96,11 @@ def test_cors_allows_configured_origin_without_credentials(client):
 
 
 def test_api_key_required_when_configured(client, app_module, monkeypatch):
-    monkeypatch.setattr(app_module, "SIMPLE_RAG_API_KEY", "s3cret-placeholder")
+    monkeypatch.setattr(app_module, "SIMPLE_RAG_API_KEY", "test-key")
     assert client.post("/query/", json={"question": "hi"}).status_code == 401
     assert client.post("/query/", json={"question": "hi"}, headers={"X-API-Key": "wrong"}).status_code == 401
     assert client.post("/upload/", files=[_md("a.md", "hello")]).status_code == 401
-    ok = client.post("/query/", json={"question": "hi"}, headers={"X-API-Key": "s3cret-placeholder"})
+    ok = client.post("/query/", json={"question": "hi"}, headers={"X-API-Key": "test-key"})
     assert ok.status_code == 200
     assert client.get("/health").status_code == 200
 
