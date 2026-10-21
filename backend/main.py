@@ -35,10 +35,9 @@ from backend.models import (
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
-# 在应用启动时创建数据库表和初始化服务
-# 注意：create_db_and_tables() 应该在任何依赖它的服务之前调用
-create_db_and_tables()
-services.initialize_services()  # 初始化 Milvus 连接和集合等
+# The SQLite table and the Milvus connection are set up in the app lifespan (see `lifespan` below), not at
+# import time. `python -m backend.main` with reload on imports this module in the reloader's parent process
+# too, and a Milvus Lite file can only be opened by one process.
 
 # Environment variable that `python -m backend.main` sets to the address it binds,
 # so the startup check below also works in the reloader's child process.
@@ -137,6 +136,8 @@ def enforce_bind_policy(api_key: Optional[str] = None, argv=None, environ=None) 
 @asynccontextmanager
 async def lifespan(_app: FastAPI):
     enforce_bind_policy()
+    create_db_and_tables()
+    services.initialize_services()  # connect to Milvus, load or create the collection, check Ollama
     yield
 
 
@@ -494,12 +495,30 @@ if SERVE_FRONTEND and FRONTEND_DIR.is_dir():
     app.mount("/", StaticFiles(directory=FRONTEND_DIR, html=True), name="frontend")
 
 
-# 用于本地测试运行 (uvicorn backend.main:app --reload --host 127.0.0.1 --port 8000)
-if __name__ == "__main__":
+def reload_enabled(argv: Optional[Sequence[str]] = None, environ: Optional[dict] = None) -> bool:
+    """Auto-reload for `python -m backend.main` is off unless `--reload` or SIMPLE_RAG_RELOAD is given."""
+    import argparse
+
+    from backend.config import parse_bool
+
+    parser = argparse.ArgumentParser(prog="python -m backend.main")
+    parser.add_argument(
+        "--reload",
+        action="store_true",
+        help="restart the server when a source file changes (development only; also SIMPLE_RAG_RELOAD=1)",
+    )
+    args = parser.parse_args(list(sys.argv[1:] if argv is None else argv))
+    environ = os.environ if environ is None else environ
+    return args.reload or parse_bool(environ.get("SIMPLE_RAG_RELOAD"))
+
+
+def main(argv: Optional[Sequence[str]] = None) -> None:
+    """Entry point of `python -m backend.main [--reload]`."""
     import uvicorn
 
     from backend.config import FASTAPI_HOST, FASTAPI_PORT
 
+    reload = reload_enabled(argv)
     if not is_loopback_host(FASTAPI_HOST) and not SIMPLE_RAG_API_KEY:
         raise SystemExit(
             f"Refusing to listen on non-loopback address {FASTAPI_HOST} without SIMPLE_RAG_API_KEY. "
@@ -507,9 +526,9 @@ if __name__ == "__main__":
         )
     # Tell the lifespan check (also in the reloader's child process) which address is used.
     os.environ[BIND_HOST_ENV] = FASTAPI_HOST
-    logger.info(f"Starting Uvicorn server on {FASTAPI_HOST}:{FASTAPI_PORT}")
-    # 注意：当使用 `python backend/main.py` 启动时，uvicorn.run的第一个参数应该是字符串 'backend.main:app'
-    # 或者，如果直接运行此文件，且app实例已在此文件中定义，可以直接是 app
-    # 为了统一，当从项目根目录用 uvicorn backend.main:app --reload 启动时，此 __main__块不会执行。
-    # 如果希望直接 python backend/main.py 就能跑，则可以用 app，但推荐用uvicorn命令。
-    uvicorn.run("backend.main:app", host=FASTAPI_HOST, port=FASTAPI_PORT, reload=True)
+    logger.info(f"Starting Uvicorn server on {FASTAPI_HOST}:{FASTAPI_PORT} (reload={'on' if reload else 'off'})")
+    uvicorn.run("backend.main:app", host=FASTAPI_HOST, port=FASTAPI_PORT, reload=reload)
+
+
+if __name__ == "__main__":
+    main()

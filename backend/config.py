@@ -10,11 +10,15 @@ from dotenv import load_dotenv
 load_dotenv()
 
 
-def _get_bool(name: str, default: bool = False) -> bool:
-    value = os.getenv(name)
+def parse_bool(value, default: bool = False) -> bool:
+    """`1`, `true`, `yes` and `on` (any case) are true; any other value is false; None gives the default."""
     if value is None:
         return default
     return value.strip().lower() in {"1", "true", "yes", "on"}
+
+
+def _get_bool(name: str, default: bool = False) -> bool:
+    return parse_bool(os.getenv(name), default)
 
 
 def _get_list(name: str, default: str) -> list[str]:
