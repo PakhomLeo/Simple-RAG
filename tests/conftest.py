@@ -45,6 +45,8 @@ os.environ.update(
         "MILVUS_DIMENSION": str(DIM),
         "SQLITE_DATABASE_URL": f"sqlite:///{_tmp / 'rag_sqlite.db'}",
         "SIMPLE_RAG_API_KEY": "",
+        # The lifespan bind check cannot see a listen address under pytest; declare loopback.
+        "SIMPLE_RAG_BIND_HOST": "127.0.0.1",
         "CORS_ALLOW_ORIGINS": "http://localhost:8000,http://127.0.0.1:8000",
     }
 )

@@ -128,3 +128,115 @@ def test_unexpected_error_does_not_leak_details(client, app_module, monkeypatch)
 )
 def test_is_loopback_host(app_module, host, expected):
     assert app_module.is_loopback_host(host) is expected
+
+
+# --- Upload replaces both stores -------------------------------------------------------------
+
+
+def _chunk_count(app_module):
+    from backend import database
+
+    with app_module.SessionLocal() as db:
+        return db.query(database.ChunkDB).count(), {
+            row.source_document_name for row in db.query(database.ChunkDB).all()
+        }
+
+
+def test_upload_clears_sqlite_and_milvus(client, app_module):
+    r = client.post("/upload/", files=[_md("first.md", "first document about apples. " * 20)])
+    assert r.status_code == 200, r.text
+    first_chunks = r.json()[0]["total_chunks"]
+    assert first_chunks > 0
+
+    r = client.post("/upload/", files=[_md("second.md", "second document about pears. " * 10)])
+    assert r.status_code == 200, r.text
+    second_chunks = r.json()[0]["total_chunks"]
+
+    count, names = _chunk_count(app_module)
+    assert names == {"second.md"}
+    assert count == second_chunks
+    assert app_module.services.get_milvus_collection().num_entities == second_chunks
+
+    body = client.post("/query/", json={"question": "apples?", "top_k": 50}).json()
+    assert {s["source_document_name"] for s in body["rag_sources"]} == {"second.md"}
+
+
+def test_upload_keeps_sqlite_when_milvus_clear_fails(client, app_module, monkeypatch):
+    r = client.post("/upload/", files=[_md("keep.md", "keep me around please. " * 20)])
+    assert r.status_code == 200
+    before = _chunk_count(app_module)
+
+    def fail():
+        raise RuntimeError("milvus down")
+
+    monkeypatch.setattr(app_module.services, "clear_milvus_data", fail)
+    r = client.post("/upload/", files=[_md("new.md", "new content " * 20)])
+    assert r.status_code == 500
+    assert "milvus down" not in r.text
+    assert _chunk_count(app_module) == before
+
+
+def test_clear_milvus_data_raises_on_failure(app_module, monkeypatch):
+    services = app_module.services
+
+    def boom(*a, **k):
+        raise Exception("drop failed")
+
+    monkeypatch.setattr(services.utility, "has_collection", boom)
+    with pytest.raises(RuntimeError):
+        services.clear_milvus_data()
+
+
+# --- Startup bind check ----------------------------------------------------------------------
+
+
+@pytest.mark.parametrize(
+    "argv,environ,expected",
+    [
+        (["uvicorn", "backend.main:app"], {}, ("127.0.0.1", "uvicorn default")),
+        (["/venv/bin/uvicorn", "backend.main:app", "--host", "0.0.0.0"], {}, ("0.0.0.0", "uvicorn --host")),
+        (["uvicorn", "backend.main:app", "--host=::"], {}, ("::", "uvicorn --host")),
+        (["/x/uvicorn/__main__.py", "backend.main:app", "--host", "10.0.0.5"], {}, ("10.0.0.5", "uvicorn --host")),
+        (["uvicorn", "backend.main:app"], {"UVICORN_HOST": "0.0.0.0"}, ("0.0.0.0", "UVICORN_HOST")),
+        (["uvicorn", "backend.main:app", "--uds", "/tmp/s.sock"], {}, ("unix-socket", "uvicorn --uds")),
+        (["uvicorn", "backend.main:app", "--fd", "3"], {}, (None, "uvicorn --fd")),
+        (["gunicorn", "backend.main:app"], {}, (None, "unknown launcher")),
+        (["anything"], {"SIMPLE_RAG_BIND_HOST": "0.0.0.0"}, ("0.0.0.0", "SIMPLE_RAG_BIND_HOST")),
+    ],
+)
+def test_detect_bind_host(app_module, argv, environ, expected):
+    assert app_module.detect_bind_host(argv, environ) == expected
+
+
+def test_bind_policy_refuses_public_address_without_key(app_module):
+    with pytest.raises(RuntimeError, match="SIMPLE_RAG_API_KEY"):
+        app_module.enforce_bind_policy("", ["uvicorn", "backend.main:app", "--host", "0.0.0.0"], {})
+
+
+def test_bind_policy_allows_public_address_with_key(app_module):
+    app_module.enforce_bind_policy("k", ["uvicorn", "backend.main:app", "--host", "0.0.0.0"], {})
+
+
+def test_bind_policy_allows_loopback_without_key(app_module):
+    app_module.enforce_bind_policy("", ["uvicorn", "backend.main:app"], {})
+    app_module.enforce_bind_policy("", ["uvicorn", "backend.main:app", "--uds", "/tmp/s.sock"], {})
+
+
+def test_bind_policy_warns_when_address_unknown(app_module, caplog):
+    with caplog.at_level("WARNING"):
+        app_module.enforce_bind_policy("", ["gunicorn", "backend.main:app"], {})
+    assert "SECURITY WARNING" in caplog.text
+
+
+def test_lifespan_refuses_to_start_on_public_address(app_module, monkeypatch):
+    from fastapi.testclient import TestClient
+
+    monkeypatch.setenv("SIMPLE_RAG_BIND_HOST", "0.0.0.0")
+    monkeypatch.setattr(app_module, "SIMPLE_RAG_API_KEY", "")
+    with pytest.raises(RuntimeError, match="Refusing to start"):
+        with TestClient(app_module.app):
+            pass
+
+    monkeypatch.setattr(app_module, "SIMPLE_RAG_API_KEY", "k")
+    with TestClient(app_module.app) as c:
+        assert c.get("/health").status_code == 200

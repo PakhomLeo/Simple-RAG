@@ -373,8 +373,8 @@ def clear_milvus_data():
             logger.info(f"Milvus collection '{collection_name}' not found. No action needed for clearing.")
     except Exception as e:
         logger.error(f"Error occurred while trying to drop Milvus collection '{collection_name}': {e}")
-        # 根据需求，这里可以决定是否抛出异常，如果清空失败是关键错误的话
-        # raise RuntimeError(f"Failed to clear Milvus collection '{collection_name}': {e}")
+        # Fail loudly: the upload must not continue (and must not clear SQLite) if old vectors remain.
+        raise RuntimeError(f"Failed to clear Milvus collection '{collection_name}': {e}") from e
 
 
 # --- Ollama LLM 服务 ---

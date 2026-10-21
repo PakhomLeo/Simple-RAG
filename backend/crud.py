@@ -33,3 +33,10 @@ def get_chunks_by_ids(db: Session, chunk_ids: List[str]) -> List[database.ChunkD
 
 def get_all_chunks(db: Session, skip: int = 0, limit: int = 100) -> List[database.ChunkDB]:
     return db.query(database.ChunkDB).offset(skip).limit(limit).all()
+
+
+def delete_all_chunks(db: Session) -> int:
+    """Delete every stored chunk. Returns the number of deleted rows."""
+    deleted = db.query(database.ChunkDB).delete(synchronize_session=False)
+    db.commit()
+    return deleted

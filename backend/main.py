@@ -1,8 +1,11 @@
 import hmac
 import ipaddress
 import logging
+import os
+import sys
+from contextlib import asynccontextmanager
 from pathlib import Path
-from typing import List, Optional  # 导入 List
+from typing import List, Optional, Sequence, Tuple  # 导入 List
 
 from fastapi import Depends, FastAPI, File, Header, HTTPException, UploadFile
 from fastapi.middleware.cors import CORSMiddleware  # 用于处理跨域请求
@@ -37,7 +40,107 @@ logger = logging.getLogger(__name__)
 create_db_and_tables()
 services.initialize_services()  # 初始化 Milvus 连接和集合等
 
-app = FastAPI(title="Local RAG API")
+# Environment variable that `python -m backend.main` sets to the address it binds,
+# so the startup check below also works in the reloader's child process.
+BIND_HOST_ENV = "SIMPLE_RAG_BIND_HOST"
+
+
+def is_loopback_host(host: str) -> bool:
+    if host == "localhost":
+        return True
+    try:
+        return ipaddress.ip_address(host.strip("[]")).is_loopback
+    except ValueError:
+        return False
+
+
+def _is_uvicorn_cli(argv: Sequence[str]) -> bool:
+    if not argv:
+        return False
+    first = argv[0].replace("\\", "/")
+    name = first.rsplit("/", 1)[-1].lower()
+    return name in {"uvicorn", "uvicorn.exe"} or first.endswith("uvicorn/__main__.py")
+
+
+def detect_bind_host(argv: Optional[Sequence[str]] = None, environ: Optional[dict] = None) -> Tuple[Optional[str], str]:
+    """Best-effort guess of the address the server listens on.
+
+    Returns ``(host, source)``. ``host`` is ``None`` when the address cannot be determined
+    (for example under gunicorn or a custom ``uvicorn.run(...)`` call), and ``"unix-socket"``
+    for ``uvicorn --uds``, which is not reachable over the network.
+    """
+    argv = list(sys.argv if argv is None else argv)
+    environ = os.environ if environ is None else environ
+
+    explicit = environ.get(BIND_HOST_ENV, "").strip()
+    if explicit:
+        return explicit, BIND_HOST_ENV
+
+    if _is_uvicorn_cli(argv):
+        host: Optional[str] = None
+        uds = False
+        fd = False
+        args = argv[1:]
+        i = 0
+        while i < len(args):
+            arg = args[i]
+            if arg == "--host" and i + 1 < len(args):
+                host = args[i + 1]
+                i += 1
+            elif arg.startswith("--host="):
+                host = arg.split("=", 1)[1]
+            elif arg == "--uds" or arg.startswith("--uds="):
+                uds = True
+            elif arg == "--fd" or arg.startswith("--fd="):
+                fd = True
+            i += 1
+        if uds:
+            return "unix-socket", "uvicorn --uds"
+        if fd:
+            return None, "uvicorn --fd"
+        if host is not None:
+            return host, "uvicorn --host"
+        env_host = environ.get("UVICORN_HOST", "").strip()
+        if env_host:
+            return env_host, "UVICORN_HOST"
+        return "127.0.0.1", "uvicorn default"
+
+    return None, "unknown launcher"
+
+
+def enforce_bind_policy(api_key: Optional[str] = None, argv=None, environ=None) -> None:
+    """Refuse to start on a non-loopback address without SIMPLE_RAG_API_KEY.
+
+    Runs in the app lifespan, so it covers `uvicorn backend.main:app ...` as well as
+    `python -m backend.main`. When the address cannot be determined, log a prominent warning.
+    """
+    key = SIMPLE_RAG_API_KEY if api_key is None else api_key
+    host, source = detect_bind_host(argv, environ)
+    if host is None:
+        if not key:
+            logger.warning(
+                "!!! SECURITY WARNING: could not determine the listen address (%s) and SIMPLE_RAG_API_KEY is "
+                "not set. Anyone who can reach this server can upload documents and wipe the index. "
+                "Bind to 127.0.0.1 or set SIMPLE_RAG_API_KEY. !!!",
+                source,
+            )
+        return
+    if host == "unix-socket" or is_loopback_host(host):
+        return
+    if not key:
+        raise RuntimeError(
+            f"Refusing to start: listening on non-loopback address {host!r} (from {source}) without "
+            "SIMPLE_RAG_API_KEY. Set SIMPLE_RAG_API_KEY or bind to 127.0.0.1."
+        )
+
+
+@asynccontextmanager
+async def lifespan(_app: FastAPI):
+    enforce_bind_policy()
+    yield
+
+
+app = FastAPI(title="Local RAG API", lifespan=lifespan)
 
 # CORS: only the origins listed in CORS_ALLOW_ORIGINS may call the API from a browser.
 # The bundled UI is served by this app (same origin) and needs no CORS entry.
@@ -88,15 +191,22 @@ async def upload_document(files: List[UploadFile] = File(...), db: Session = Dep
     if len(files) > MAX_UPLOAD_FILES:
         raise HTTPException(status_code=413, detail=f"Too many files. At most {MAX_UPLOAD_FILES} files per upload.")
 
-    # 首先，在处理任何文件之前，清空Milvus中的旧数据 (确保只执行一次)
+    # Every upload replaces the whole index: clear Milvus first, then SQLite, so both stores stay in sync.
+    # If Milvus cannot be cleared, nothing is deleted from SQLite and the upload is aborted.
     try:
-        logger.info("Clearing existing data from Milvus before new upload batch...")
+        logger.info("Clearing existing vectors from Milvus before new upload batch...")
         services.clear_milvus_data()
         logger.info("Milvus data cleared successfully (or collection was already empty).")
     except Exception as e:
         logger.error(f"Error clearing Milvus data: {e}", exc_info=True)
-        # 根据需求，如果清空失败是关键错误，可以抛出HTTPException阻止后续处理
-        raise HTTPException(status_code=500, detail=f"Failed to clear Milvus before upload: {str(e)}")
+        raise HTTPException(status_code=500, detail="Failed to clear the vector store before upload.")
+    try:
+        deleted = crud.delete_all_chunks(db)
+        logger.info(f"Deleted {deleted} old chunks from SQLite.")
+    except Exception as e:
+        db.rollback()
+        logger.error(f"Error clearing SQLite chunks: {e}", exc_info=True)
+        raise HTTPException(status_code=500, detail="Failed to clear the chunk store before upload.")
 
     for file in files:  # 遍历文件列表
         display_name = _safe_display_name(file.filename)
@@ -384,15 +494,6 @@ if SERVE_FRONTEND and FRONTEND_DIR.is_dir():
     app.mount("/", StaticFiles(directory=FRONTEND_DIR, html=True), name="frontend")
 
 
-def is_loopback_host(host: str) -> bool:
-    if host == "localhost":
-        return True
-    try:
-        return ipaddress.ip_address(host.strip("[]")).is_loopback
-    except ValueError:
-        return False
-
-
 # 用于本地测试运行 (uvicorn backend.main:app --reload --host 127.0.0.1 --port 8000)
 if __name__ == "__main__":
     import uvicorn
@@ -404,6 +505,8 @@ if __name__ == "__main__":
             f"Refusing to listen on non-loopback address {FASTAPI_HOST} without SIMPLE_RAG_API_KEY. "
             "Set SIMPLE_RAG_API_KEY or use FASTAPI_HOST=127.0.0.1."
         )
+    # Tell the lifespan check (also in the reloader's child process) which address is used.
+    os.environ[BIND_HOST_ENV] = FASTAPI_HOST
     logger.info(f"Starting Uvicorn server on {FASTAPI_HOST}:{FASTAPI_PORT}")
     # 注意：当使用 `python backend/main.py` 启动时，uvicorn.run的第一个参数应该是字符串 'backend.main:app'
     # 或者，如果直接运行此文件，且app实例已在此文件中定义，可以直接是 app
