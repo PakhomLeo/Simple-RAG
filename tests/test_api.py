@@ -425,3 +425,42 @@ def test_upload_embedding_failure_hides_host_and_port(client, unreachable_embedd
         == "Error processing document: Could not reach the embedding API. See the server log for details."
     )
     assert "127.0.0.1" not in r.text and str(unreachable_embedding) not in r.text
+
+
+# --- rag_sources follow the retrieval ranking -----------------------------------------------
+
+
+def test_rag_sources_follow_milvus_ranking(client, app_module, monkeypatch):
+    """Regression: rag_sources (and similarity_scores) followed the order SQLite returned the rows in,
+    not the distance ranking from Milvus."""
+    r = client.post("/upload/", files=[_md("doc.md", "".join(f"Paragraph {i} " * 30 for i in range(6)))])
+    assert r.status_code == 200, r.text
+    from backend import database
+
+    with app_module.SessionLocal() as db:
+        ids = [row.chunk_id for row in db.query(database.ChunkDB).all()]
+    assert len(ids) >= 4
+    # Milvus ranks the hits closest first; use the reverse of the SQLite order.
+    ranked = list(reversed(ids))[:4]
+    hits = [{"chunk_id": cid, "distance": 0.1 * (i + 1)} for i, cid in enumerate(ranked)]
+    monkeypatch.setattr(app_module.services, "search_in_milvus", lambda emb, top_k: hits[:top_k])
+
+    body = client.post("/query/", json={"question": "Paragraph?", "top_k": 4}).json()
+    assert [s["chunk_id"] for s in body["rag_sources"]] == ranked
+    assert [s["source_chunk_id"] for s in body["similarity_scores"]] == ranked
+
+
+def test_rag_sources_order_with_real_search(client, app_module, monkeypatch):
+    client.post("/upload/", files=[_md("doc.md", "".join(f"Topic {c} " * 25 for c in "ABCDEFG"))])
+    real = app_module.services.search_in_milvus
+    seen = {}
+
+    def spy(emb, top_k):
+        seen["hits"] = real(emb, top_k)
+        return seen["hits"]
+
+    monkeypatch.setattr(app_module.services, "search_in_milvus", spy)
+    body = client.post("/query/", json={"question": "Topic D", "top_k": 5}).json()
+    distances = [h["distance"] for h in seen["hits"]]
+    assert distances == sorted(distances)
+    assert [s["chunk_id"] for s in body["rag_sources"]] == [h["chunk_id"] for h in seen["hits"]]

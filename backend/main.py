@@ -380,7 +380,9 @@ async def query_llm(request: QueryRequest, db: Session = Depends(get_db)):
             retrieved_chunk_ids = [chunk_info["chunk_id"] for chunk_info in retrieved_milvus_chunks]
             logger.info(f"Retrieved {len(retrieved_chunk_ids)} chunk IDs from Milvus: {retrieved_chunk_ids}")
 
-            rag_source_db_chunks = crud.get_chunks_by_ids(db, retrieved_chunk_ids)
+            # SQLite returns the rows in its own order; put them back in Milvus's ranking (closest first).
+            rows_by_id = {row.chunk_id: row for row in crud.get_chunks_by_ids(db, retrieved_chunk_ids)}
+            rag_source_db_chunks = [rows_by_id[cid] for cid in retrieved_chunk_ids if cid in rows_by_id]
             if not rag_source_db_chunks:
                 logger.warning("Could not retrieve chunk details from SQLite even though Milvus returned IDs.")
                 rag_context_text = "检索到的信息无法加载。"
