@@ -1,6 +1,6 @@
 <svg xmlns="http://www.w3.org/2000/svg" width="960" height="560" viewBox="0 0 960 560" role="img" aria-labelledby="title desc" font-family="Inter, Segoe UI, Helvetica, Arial, sans-serif">
   <title id="title">Simple RAG upload and query flow</title>
-  <desc id="desc">Upload: clear Milvus and SQLite, parse Markdown, split into chunks, save to SQLite, embed, insert into Milvus. Query: embed question, search Top-K, filter by distance, load text from SQLite, build prompt, ask the LLM with and without context, compute similarity, return.</desc>
+  <desc id="desc">Upload: check every file, parse Markdown and split into chunks, return 400 without changes if no file is valid, otherwise clear Milvus and SQLite, add the chunks to an SQLite transaction, embed, insert into Milvus and commit; a failed file is rolled back. Query: embed question, search Top-K, filter by distance, load text from SQLite in Milvus rank order, build prompt, ask the LLM with and without context, compute similarity, return.</desc>
   <style>
     .bg { fill: #ffffff; }
     .step { fill: #f6f8fa; stroke: #57606a; stroke-width: 1.4; }
@@ -35,23 +35,23 @@
   <text class="h" x="40" y="50">1 · Upload (POST /upload/)</text>
   <g>
     <rect class="step" x="40" y="80" width="130" height="90" rx="8"/>
-    <text class="t" x="105" y="115" text-anchor="middle">Clear stores</text>
-    <text class="s" x="105" y="135" text-anchor="middle">Milvus + SQLite</text>
-    <text class="s" x="105" y="152" text-anchor="middle">(once per batch)</text>
+    <text class="t" x="105" y="115" text-anchor="middle">Check files</text>
+    <text class="s" x="105" y="135" text-anchor="middle">.md (any case),</text>
+    <text class="s" x="105" y="152" text-anchor="middle">size, UTF-8</text>
 
     <rect class="step" x="190" y="80" width="130" height="90" rx="8"/>
-    <text class="t" x="255" y="115" text-anchor="middle">Check file</text>
-    <text class="s" x="255" y="135" text-anchor="middle">.md only, size,</text>
-    <text class="s" x="255" y="152" text-anchor="middle">UTF-8</text>
+    <text class="t" x="255" y="115" text-anchor="middle">Parse + chunk</text>
+    <text class="s" x="255" y="135" text-anchor="middle">markdown-it-py</text>
+    <text class="s" x="255" y="152" text-anchor="middle">size + overlap</text>
 
     <rect class="step" x="340" y="80" width="130" height="90" rx="8"/>
-    <text class="t" x="405" y="115" text-anchor="middle">Parse + chunk</text>
-    <text class="s" x="405" y="135" text-anchor="middle">markdown-it-py</text>
-    <text class="s" x="405" y="152" text-anchor="middle">size + overlap</text>
+    <text class="t" x="405" y="115" text-anchor="middle">Clear stores</text>
+    <text class="s" x="405" y="135" text-anchor="middle">Milvus + SQLite</text>
+    <text class="s" x="405" y="152" text-anchor="middle">(once per batch)</text>
 
     <rect class="hi" x="490" y="80" width="130" height="90" rx="8"/>
     <text class="t" x="555" y="115" text-anchor="middle">Save text</text>
-    <text class="s" x="555" y="135" text-anchor="middle">SQLite</text>
+    <text class="s" x="555" y="135" text-anchor="middle">SQLite transaction</text>
     <text class="s" x="555" y="152" text-anchor="middle">uuid4 chunk_id</text>
 
     <rect class="ext" x="640" y="80" width="130" height="90" rx="8"/>
@@ -62,7 +62,9 @@
     <rect class="hi" x="790" y="80" width="130" height="90" rx="8"/>
     <text class="t" x="855" y="115" text-anchor="middle">Insert vectors</text>
     <text class="s" x="855" y="135" text-anchor="middle">Milvus + flush</text>
+    <text class="s" x="855" y="152" text-anchor="middle">then commit SQLite</text>
   </g>
+  <text class="s" x="40" y="195">No valid file: 400, index unchanged. A file that fails to embed or insert is rolled back, so it is in both stores or in neither.</text>
   <path class="edge" d="M170,125 L190,125" marker-end="url(#a)"/>
   <path class="edge" d="M320,125 L340,125" marker-end="url(#a)"/>
   <path class="edge" d="M470,125 L490,125" marker-end="url(#a)"/>
@@ -88,6 +90,7 @@
   <rect class="hi" x="490" y="295" width="130" height="90" rx="8"/>
   <text class="t" x="555" y="330" text-anchor="middle">Load text</text>
   <text class="s" x="555" y="350" text-anchor="middle">SQLite by chunk_id</text>
+  <text class="s" x="555" y="367" text-anchor="middle">in Milvus rank order</text>
 
   <rect class="step" x="640" y="295" width="130" height="90" rx="8"/>
   <text class="t" x="705" y="330" text-anchor="middle">Build prompt</text>

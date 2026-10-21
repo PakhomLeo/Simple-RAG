@@ -58,7 +58,8 @@
 - 大模型运行在 Ollama 上（默认 `qwen3:4b`），答案中的 `<think>…</think>` 会被去掉。
 - 每次提问返回两个答案：一个带检索上下文（RAG），一个只用问题本身（纯 LLM）；同时返回引用来源，
   以及每个答案与每个来源之间的余弦相似度。
-- 每次上传都会**替换**之前的索引，SQLite 和 Milvus 对应的是同一批文档（边界情况见[已知限制](#已知限制)）。
+- 每次上传都会**替换**之前的索引，SQLite 和 Milvus 对应的是同一批文档。上传时先检查文件：没有可用的 `.md`
+  文件时返回 `400`，索引保持不变。每个文件要么同时存进两个存储，要么都不存（边界情况见[已知限制](#已知限制)）。
 - 默认安全：只监听 `127.0.0.1`；没有 API key 时拒绝在公网地址上启动；CORS 白名单；限制上传文件大小和数量。
 - 自带假 Embedding 接口和假 Ollama（`scripts/fake_services.py`），不需要 key 和模型，就能离线跑通整个流程和测试。
 
@@ -76,37 +77,43 @@
 
 ### 启动过程
 
-下面这些步骤都在导入 `backend.main` 时完成，早于服务开始接收请求：
+导入 `backend.main` 时只读取配置，不打开 SQLite 和 Milvus。两个存储在服务进程启动时、在应用 lifespan 中打开：
 
-1. `backend/config.py` 读取环境变量和 `.env` 文件（见[配置](#配置)）。
+1. 导入时，`backend/config.py` 读取环境变量和 `.env` 文件（见[配置](#配置)），并校验数值配置。值不合法时导入失败，
+   抛出写明变量名的 `ValueError`，例如 `CHUNK_OVERLAP (200) must be smaller than CHUNK_SIZE (200).`。
    `ARK_API_KEY` 为空时导入失败，报 `ValueError: ARK_API_KEY is not set in the environment variables.`
-2. 如果 SQLite 表 `chunks` 不存在就创建。
-3. 连接 Milvus 并加载集合；集合不存在时按配置创建（schema 和索引）。这一步失败只记日志，服务照样启动，
-   Milvus 的错误会在第一次请求时出现。
-4. 向 Ollama 请求一次模型列表。连不上时只打一条警告，继续启动。
-5. 在应用 lifespan 中运行**监听地址检查**：没有设置 `SIMPLE_RAG_API_KEY` 时，拒绝在非回环地址上启动
+2. 在 lifespan 中先运行**监听地址检查**：没有设置 `SIMPLE_RAG_API_KEY` 时，拒绝在非回环地址上启动
    （详见[部署与安全](#部署与安全)）。
+3. 如果 SQLite 表 `chunks` 不存在就创建。
+4. 连接 Milvus 并加载集合；集合不存在时按配置创建（schema 和索引）。这一步失败只记日志，服务照样启动，
+   Milvus 的错误会在第一次请求时出现。
+5. 向 Ollama 请求一次模型列表。连不上时只打一条警告，继续启动。
 
 ### 上传：解析与切块
 
 `POST /upload/` 按下面的顺序处理一批文件：
 
 1. 如果启用了 API key，先检查 `X-API-Key` 请求头。文件数超过 `MAX_UPLOAD_FILES` 时直接返回 `413`，什么都不改。
-2. **每批上传先清空一次索引。** 先删除（drop）Milvus 集合，成功后再删除 SQLite `chunks` 表里的所有行。
-   Milvus 清不掉时请求返回 `500`，SQLite 保持原样。
-3. 然后逐个处理文件。某个文件出问题只写进它自己的结果，继续处理下一个：
+2. **改动任何数据之前，先检查所有文件。** 没通过检查的文件在自己的结果里写明原因，不会被存储：
    - 文件名只保留最后一段（去掉用 `/` 或 `\` 分隔的目录部分），去掉首尾空白，截到 255 个字符；
      名字为空时用 `unnamed.md`。文件本身从不写到磁盘。
-   - 只接受以 `.md` 结尾的文件名（不区分大小写），其他文件跳过。
+   - 只接受以 `.md` 结尾的文件名（不区分大小写，`notes.md`、`NOTES.MD` 都可以），其他文件跳过。
    - 最多读取 `MAX_UPLOAD_FILE_BYTES + 1` 个字节，超过大小限制的文件跳过。
    - 按 UTF-8 解码，其他编码的文件处理失败。
    - 用 `markdown-it-py` 解析 Markdown，保留每个 `inline` token（标题、段落、列表项；`**粗体**` 这类行内标记
      会留在文本里）和每个围栏代码块的原始内容，再用换行连接起来。
    - 按 `CHUNK_SIZE` 个字符切块，每块的起点比上一块往后 `CHUNK_SIZE - CHUNK_OVERLAP` 个字符，
      相邻两块共享 `CHUNK_OVERLAP` 个字符。默认值（200/50）下每 150 个字符开始一个新块。
-     切块只看字符数，不按词、句子或标题边界。
-   - 每个块用新的 UUID4 作为 `chunk_id` 存进 SQLite；然后把这个文件的所有块放在一次请求里向量化；
-     最后把向量插入 Milvus 并 flush。
+     切块只看字符数，不按词、句子或标题边界。切不出任何块的文件跳过。
+3. **没有任何文件通过检查时，请求返回 `400`**（`No valid .md files in the upload; the index was not changed.`，
+   后面附上每个文件的原因），两个存储都保持原样。
+4. **每批上传清空一次索引。** 先删除（drop）Milvus 集合，成功后再删除 SQLite `chunks` 表里的所有行。
+   Milvus 清不掉时请求返回 `500`，SQLite 保持原样。
+5. 然后逐个存储有效文件。某个文件出问题只写进它自己的结果，继续存储下一个：
+   - 文本块分配新的 UUID4 作为 `chunk_id`，加入同一个 SQLite 事务，此时还不提交。
+   - 这个文件的所有块放在一次请求里向量化，向量插入 Milvus 并 flush 之后，才提交 SQLite 事务。
+   - Embedding 调用失败、返回的向量数量不对、或 Milvus 插入失败时，回滚这个事务。如果插入之后提交本身失败，
+     会把已插入的向量从 Milvus 再删掉。所以一个文件要么同时在两个存储里，要么都不在。
 
 ### Embedding
 
@@ -120,7 +127,18 @@ Content-Type: application/json
 ```
 
 期望的响应是 `{"data": [{"embedding": [0.1, ...]}, ...]}`，每个输入对应一项，顺序一致。请求超时时间是
-`EMBEDDING_TIMEOUT_SECONDS`。网络错误、HTTP 错误和格式不对的响应都会抛出 `ValueError`。
+`EMBEDDING_TIMEOUT_SECONDS`。失败时抛出 `services.EmbeddingError`（`ValueError` 的子类），消息是固定文本，
+从不包含 URL、主机或端口：
+
+| 失败情况 | 消息 |
+| --- | --- |
+| 连接被拒、DNS 错误或其他网络错误 | `Could not reach the embedding API. See the server log for details.` |
+| `EMBEDDING_TIMEOUT_SECONDS` 内没有响应 | `The embedding API did not answer in time. See the server log for details.` |
+| HTTP 状态码 4xx 或 5xx | `The embedding API returned HTTP <status>. See the server log for details.` |
+| 响应体没有 `data` 列表，或某一项没有 `embedding` 列表 | `Invalid response from the embedding API. See the server log for details.` |
+
+URL、原始异常和响应体的前 2000 个字符只写进服务端日志。`/query/` 对这些错误返回 `502`；
+`/upload/` 把它们写进该文件的 `message`。
 向量长度和 `MILVUS_DIMENSION` 不一致时只记一条警告，随后 Milvus 插入或搜索会失败。
 `ARK_API_KEY` 只发给 `EMBEDDING_API_URL`，不会写进日志。
 
@@ -146,7 +164,8 @@ Content-Type: application/json
 `nprobe = MILVUS_SEARCH_PARAM_NPROBE`、`limit = top_k`、`consistency_level = MILVUS_CONSISTENCY_LEVEL`。
 `distance > MILVUS_SEARCH_MAX_DISTANCE` 的结果会被丢掉。这个过滤保留的是*小*距离，适合默认的 `L2`（越小越近）。
 默认阈值 `10000.0` 非常大，实际上几乎不过滤任何结果；想去掉弱匹配就调小它。
-剩下的 `chunk_id` 再到 SQLite 里查出原文和文件名。
+剩下的 `chunk_id` 再到 SQLite 里查出原文和文件名，并按 Milvus 给出的排名（最近的在前）重新排列。
+`rag_sources`、提示词上下文和 `similarity_scores` 都用这个顺序。
 
 ### 生成
 
@@ -229,8 +248,10 @@ python -m backend.main
 # 或者：uvicorn backend.main:app --host 127.0.0.1 --port 8000
 ```
 
-`python -m backend.main` 监听 `FASTAPI_HOST:FASTAPI_PORT`（默认 `127.0.0.1:8000`），并开启自动重载。
-**使用 Milvus Lite 时请用 `uvicorn` 命令启动**（见[已知限制](#已知限制)）。打开 <http://127.0.0.1:8000/>。交互式 API 文档在 <http://127.0.0.1:8000/docs>。
+`python -m backend.main` 监听 `FASTAPI_HOST:FASTAPI_PORT`（默认 `127.0.0.1:8000`），默认不开自动重载。
+开发时可以用 `python -m backend.main --reload`（或设置 `SIMPLE_RAG_RELOAD=1`），源码改动后服务会自动重启。
+两种启动命令都能配合 Milvus 服务器和 Milvus Lite 文件使用。
+打开 <http://127.0.0.1:8000/>。交互式 API 文档在 <http://127.0.0.1:8000/docs>。
 
 > **请始终通过后端的 `/` 打开界面。** 不支持直接从磁盘打开 `frontend/index.html`（`file://`），
 > 浏览器会拦截 API 请求。
@@ -260,7 +281,7 @@ export EMBEDDING_API_URL=http://127.0.0.1:18080/api/v3/embeddings
 export OLLAMA_BASE_URL=http://127.0.0.1:18080
 export MILVUS_CONNECTION_URI=./milvus_lite.db
 export MILVUS_DIMENSION=64                  # 必须和 --dim 一致
-uvicorn backend.main:app --host 127.0.0.1 --port 8000   # 用 Milvus Lite 时不要用 python -m backend.main
+python -m backend.main                      # 或者：uvicorn backend.main:app --host 127.0.0.1 --port 8000
 ```
 
 然后打开 <http://127.0.0.1:8000/>，上传 `examples/sample.md` 或 `examples/sample.zh-CN.md` 并提问，
@@ -274,8 +295,9 @@ uvicorn backend.main:app --host 127.0.0.1 --port 8000   # 用 Milvus Lite 时不
 
 页面（`frontend/index.html`，中文界面）分四部分：
 
-1. **上传 Markdown 文档**：选一个或多个 `.md` 文件后点上传，页面会列出每个文件的结果（文本块数，或被跳过的原因）。
-   每次上传都会替换索引。
+1. **上传 Markdown 文档**：选一个或多个 `.md` 文件（不区分大小写，例如 `NOTES.MD`）后点上传，其他文件在上传前就被排除。
+   页面会列出每个文件的结果（文本块数，或被跳过的原因）。每次上传都会替换索引；所有文件都不可用时，
+   页面显示 `400` 的错误消息，索引保持不变。
 2. **配置与提问**：Top-K（表单里是 1–10；API 允许到 `MAX_TOP_K`）、可选的 API Key 输入框
    （只有后端设置了 `SIMPLE_RAG_API_KEY` 时才需要填，值保存在当前标签页的 `sessionStorage` 里），以及问题。
 3. **结果展示**：RAG 答案和纯 LLM 答案并排显示，下面是相似度条形图（余弦相似度的平方，每个来源块一组柱子，
@@ -289,6 +311,8 @@ uvicorn backend.main:app --host 127.0.0.1 --port 8000   # 用 Milvus Lite 时不
 
 所有配置都是环境变量。`backend/config.py` 还会用 python-dotenv 加载 `.env` 文件：从 `backend/` 目录开始逐级往上找，
 所以把 `.env` 放在项目根目录即可。环境里已经设置的变量优先于 `.env`。配置只在导入时读取一次，改完要重启服务。
+数值配置在读取时就会校验：不是数字或超出范围（例如 `CHUNK_SIZE=0`、`FASTAPI_PORT=70000`、
+`EMBEDDING_TIMEOUT_SECONDS=0`，或 `CHUNK_OVERLAP` 不小于 `CHUNK_SIZE`）时，应用在启动时抛出写明变量名的 `ValueError`。
 [`.env.example`](.env.example) 列出了一般需要设置的所有变量。
 
 ### Embedding 接口
@@ -298,7 +322,7 @@ uvicorn backend.main:app --host 127.0.0.1 --port 8000   # 用 Milvus Lite 时不
 | `ARK_API_KEY` | *（无，必填）* | Embedding 接口的 Bearer token。为空时应用无法启动。使用假服务时任意非空值即可。 |
 | `EMBEDDING_API_URL` | `https://ark.cn-beijing.volces.com/api/v3/embeddings` | Embedding 接口地址（格式见 [Embedding](#embedding)） |
 | `EMBEDDING_MODEL_NAME` | `doubao-embedding-text-240715` | 请求里 `model` 字段的值 |
-| `EMBEDDING_TIMEOUT_SECONDS` | `60` | 每次 Embedding 请求的超时秒数（浮点数） |
+| `EMBEDDING_TIMEOUT_SECONDS` | `60` | 每次 Embedding 请求的超时秒数（浮点数，必须大于 0） |
 
 ### 大模型（Ollama）
 
@@ -331,8 +355,8 @@ uvicorn backend.main:app --host 127.0.0.1 --port 8000   # 用 Milvus Lite 时不
 
 | 变量 | 默认值 | 说明 |
 | --- | --- | --- |
-| `CHUNK_SIZE` | `200` | 每块的字符数 |
-| `CHUNK_OVERLAP` | `50` | 相邻两块共享的字符数。**必须小于 `CHUNK_SIZE`**，否则切块永远不会结束，上传会卡住。 |
+| `CHUNK_SIZE` | `200` | 每块的字符数（至少 1） |
+| `CHUNK_OVERLAP` | `50` | 相邻两块共享的字符数（至少 0）。**必须小于 `CHUNK_SIZE`**，否则应用不会启动（`CHUNK_OVERLAP (…) must be smaller than CHUNK_SIZE (…).`）。 |
 | `SQLITE_DATABASE_URL` | `sqlite:///./rag_sqlite.db` | 文本块存储的 SQLAlchemy URL。相对路径相对于当前工作目录。只支持 SQLite（引擎传了 SQLite 专用的 `check_same_thread` 参数）。 |
 
 ### 服务
@@ -340,7 +364,8 @@ uvicorn backend.main:app --host 127.0.0.1 --port 8000   # 用 Milvus Lite 时不
 | 变量 | 默认值 | 说明 |
 | --- | --- | --- |
 | `FASTAPI_HOST` | `127.0.0.1` | `python -m backend.main` 的监听地址（`uvicorn` 命令行不读它） |
-| `FASTAPI_PORT` | `8000` | `python -m backend.main` 的监听端口 |
+| `FASTAPI_PORT` | `8000` | `python -m backend.main` 的监听端口（1–65535） |
+| `SIMPLE_RAG_RELOAD` | *（空，关闭）* | `python -m backend.main` 的自动重载，效果同 `--reload`。`1`、`true`、`yes`、`on`（不区分大小写）表示开启。只用于开发。`uvicorn` 命令行不读它（请用它自己的 `--reload`）。 |
 | `SERVE_FRONTEND` | `true` | 是否在 `/` 提供 `frontend/`。`1`、`true`、`yes`、`on`（不区分大小写）表示开启，其他值都表示关闭。 |
 
 ### 安全
@@ -400,7 +425,7 @@ curl -H "X-API-Key: $SIMPLE_RAG_API_KEY" \
      http://127.0.0.1:8000/upload/
 ```
 
-响应 `200`：每个文件一个对象，顺序与请求一致。
+响应 `200`（至少有一个文件可用）：每个文件一个对象，顺序与请求一致。
 
 ```json
 [
@@ -410,15 +435,17 @@ curl -H "X-API-Key: $SIMPLE_RAG_API_KEY" \
 ]
 ```
 
-单个文件出问题**不会**改变状态码：请求仍然返回 `200`，由该文件的 `message` 说明原因（`total_chunks` 为 `0`）：
+只要至少有一个文件通过检查，单个文件出问题就**不会**改变状态码：请求返回 `200`，由该文件的 `message`
+说明原因（`total_chunks` 为 `0`）：
 
 | `message` | 原因 |
 | --- | --- |
 | `Document processed and stored successfully.` | 成功；`total_chunks` 是文本块数量 |
-| `Skipped: Invalid file type. Only .md files are allowed.` | 文件名不以 `.md` 结尾 |
+| `Skipped: Invalid file type. Only .md files are allowed.` | 文件名不以 `.md` 结尾（不区分大小写） |
 | `Skipped: file is larger than <N> bytes.` | 超过 `MAX_UPLOAD_FILE_BYTES` |
 | `File content is empty or too short to be chunked.` | 解析后没有文本 |
-| `Error processing document (ValueError): …` | 不是合法的 UTF-8，或者 Embedding 接口调用失败 |
+| `Error processing document (ValueError): …` | 不是合法的 UTF-8 |
+| `Error processing document: <message>` | Embedding 接口调用失败；`<message>` 是 [Embedding](#embedding) 一节列出的消息之一 |
 | `Embedding generation failed or count mismatch.` | Embedding 接口返回的向量数量不对 |
 | `Service connection error during processing: …` | 连接 Milvus 失败 |
 | `Runtime error during processing: …` | 插入 Milvus 失败（例如维度不一致） |
@@ -429,10 +456,17 @@ curl -H "X-API-Key: $SIMPLE_RAG_API_KEY" \
 | 状态码 | `detail` | 原因 |
 | --- | --- | --- |
 | `401` | `Invalid or missing API key.` | 启用了 API key，但请求头缺失或错误 |
+| `400` | `No valid .md files in the upload; the index was not changed. <file>: <message> …` | 没有任何文件通过检查（扩展名不对、太大、不是 UTF-8、没有文本）；什么都没有改 |
 | `413` | `Too many files. At most <N> files per upload.` | 文件数超过 `MAX_UPLOAD_FILES`；什么都没有改 |
 | `422` | FastAPI 校验错误列表 | 表单里没有 `files` 字段 |
 | `500` | `Failed to clear the vector store before upload.` | Milvus 清空失败；SQLite 没有动 |
 | `500` | `Failed to clear the chunk store before upload.` | SQLite 清空失败（Milvus 已经清空） |
+
+只上传无效文件时（`curl … -F files=@LICENSE -F files=@pyproject.toml …`），响应 `400`：
+
+```json
+{"detail": "No valid .md files in the upload; the index was not changed. LICENSE: Skipped: Invalid file type. Only .md files are allowed. pyproject.toml: Skipped: Invalid file type. Only .md files are allowed."}
+```
 
 ### POST /query/
 
@@ -449,32 +483,32 @@ curl -H "X-API-Key: $SIMPLE_RAG_API_KEY" \
 
 ```json
 {
-  "rag_answer": "[fake LLM, with RAG context] s the Milvus collection and then deletes all chunk rows from SQLite, …",
+  "rag_answer": "[fake LLM, with RAG context] the prompt. Showing the answer with context next to the answer without context …",
   "rag_sources": [
     {
-      "chunk_id": "248db5b1-3ec3-47d3-ac38-56bba9ef905e",
-      "original_content": "s the Milvus collection and\nthen deletes all chunk rows from SQLite, …",
+      "chunk_id": "bfb950c0-0793-4c8a-8142-171777bd08cb",
+      "original_content": " the prompt. Showing the answer with context next to the answer without context\n…",
       "source_document_name": "sample.md"
     },
     {
-      "chunk_id": "43d2950f-bc0c-4f21-923e-dbe8830f9eae",
-      "original_content": " the prompt. Showing the answer with context next to the answer without context\n…",
+      "chunk_id": "b88fef1b-2827-4d8e-abbd-307785d5f326",
+      "original_content": "s the Milvus collection and\n…",
       "source_document_name": "sample.md"
     }
   ],
   "llm_only_answer": "[fake LLM, no context] I received a 29-character question.",
   "similarity_scores": [
     {
-      "source_chunk_id": "248db5b1-3ec3-47d3-ac38-56bba9ef905e",
+      "source_chunk_id": "bfb950c0-0793-4c8a-8142-171777bd08cb",
       "source_document_name": "sample.md",
-      "similarity_with_rag_answer": 0.9887575046469967,
-      "similarity_with_llm_only_answer": 0.8429327981243102
+      "similarity_with_rag_answer": 0.9862400164430501,
+      "similarity_with_llm_only_answer": 0.8653134681885776
     },
     {
-      "source_chunk_id": "43d2950f-bc0c-4f21-923e-dbe8830f9eae",
+      "source_chunk_id": "b88fef1b-2827-4d8e-abbd-307785d5f326",
       "source_document_name": "sample.md",
-      "similarity_with_rag_answer": 0.9180291468713477,
-      "similarity_with_llm_only_answer": 0.8653134681885776
+      "similarity_with_rag_answer": 0.906391919665587,
+      "similarity_with_llm_only_answer": 0.8429327981243102
     }
   ]
 }
@@ -483,9 +517,9 @@ curl -H "X-API-Key: $SIMPLE_RAG_API_KEY" \
 | 字段 | 类型 | 说明 |
 | --- | --- | --- |
 | `rag_answer` | string | RAG 提示词（问题加检索上下文）的答案 |
-| `rag_sources` | array | 通过距离过滤的检索结果：`chunk_id`、`original_content`、`source_document_name`。没找到时为空数组。顺序是 SQLite 返回行的顺序，不一定按相似度排名。 |
+| `rag_sources` | array | 通过距离过滤的检索结果：`chunk_id`、`original_content`、`source_document_name`。没找到时为空数组。按 Milvus 的排名排列，最近的在前。 |
 | `llm_only_answer` | string | 只用问题本身得到的答案 |
-| `similarity_scores` | array 或 `null` | 每个答案与每个来源块的余弦相似度（见[相似度对比](#相似度对比)）；没有来源时为 `null` |
+| `similarity_scores` | array 或 `null` | 每个答案与每个来源块的余弦相似度（见[相似度对比](#相似度对比)），顺序与 `rag_sources` 相同；没有来源时为 `null` |
 
 索引为空时查询也会成功：
 
@@ -500,10 +534,16 @@ curl -H "X-API-Key: $SIMPLE_RAG_API_KEY" \
 | --- | --- | --- |
 | `401` | `Invalid or missing API key.` | 启用了 API key，但请求头缺失或错误 |
 | `422` | FastAPI 校验错误列表 | `question` 为空或过长、`top_k` 超出范围、JSON 不合法 |
-| `400` | `Embedding API request failed: …` 或 `Invalid response from Embedding API: …` | Embedding 接口连不上、返回 HTTP 错误或格式不对（以 `ValueError` 抛出） |
+| `502` | `Could not reach the embedding API. See the server log for details.` 及 [Embedding](#embedding) 一节列出的其他消息 | Embedding 接口连不上、超时、返回 HTTP 错误或格式不对。`detail` 不含主机和端口，细节在服务端日志里。 |
 | `503` | `Service connection error: …` | 连接 Milvus 失败 |
 | `500` | `Runtime error during processing: …` | Milvus 搜索或 Ollama 调用失败 |
 | `500` | `An unexpected error occurred. See the server log for details.` | 其他错误；细节只写在服务端日志里 |
+
+停掉 Embedding 接口后：
+
+```json
+{"detail": "Could not reach the embedding API. See the server log for details."}
+```
 
 校验错误示例（`"top_k": 0`）：
 
@@ -532,11 +572,12 @@ curl http://127.0.0.1:8000/health
 | 状态码 | 端点 | 含义 |
 | --- | --- | --- |
 | `200` | 全部 | 成功。`/upload/` 要逐个查看每个文件的 `message`。 |
-| `400` | `/query/` | Embedding 接口失败。不在白名单里的来源发起 CORS 预检时也返回 `400`。 |
+| `400` | `/upload/` | 上传的文件都没有通过检查，索引没有改动。不在白名单里的来源发起 CORS 预检时也返回 `400`。 |
 | `401` | `/upload/`、`/query/` | `X-API-Key` 缺失或错误 |
 | `413` | `/upload/` | 文件数过多 |
 | `422` | `/upload/`、`/query/` | 请求校验失败 |
 | `500` | `/upload/`、`/query/` | 存储清空失败；Milvus 或 Ollama 出错；意外错误 |
+| `502` | `/query/` | Embedding 接口失败 |
 | `503` | `/query/` | 连接 Milvus 失败 |
 
 错误响应体是 `{"detail": "<message>"}`；`422` 例外，它的 `detail` 是 FastAPI 的校验错误列表。
@@ -554,13 +595,19 @@ pytest
 
 测试不需要网络、key 和模型。`tests/conftest.py` 会在后台线程里用一个空闲端口启动 `scripts/fake_services.py`，
 让后端连到它，使用临时的 Milvus Lite 文件和临时 SQLite 文件（向量 32 维），并为监听地址检查设置
-`SIMPLE_RAG_BIND_HOST=127.0.0.1`。测试共 46 个，覆盖：
+`SIMPLE_RAG_BIND_HOST=127.0.0.1`。测试共 84 个，覆盖：
 
 - `tests/test_services.py`：切块重叠、Markdown 文本提取、余弦相似度的边界情况、Embedding 请求（超时、错误处理）、
   默认主机都是本地地址；
+- `tests/test_config.py`：`CHUNK_SIZE`、`CHUNK_OVERLAP` 及其他数值配置的校验；
+- `tests/test_startup.py`：导入 `backend.main` 不打开任何存储、默认不开自动重载、`python -m backend.main`
+  （开或不开重载）配合 Milvus Lite 能正常上传和查询；
 - `tests/test_api.py`：健康检查和同源网页、上传和查询端到端、文件名清理、文件大小/数量/UTF-8 处理、
-  `top_k` 和问题校验、CORS、API key、意外错误不泄露细节、上传同时清空两个存储（以及 Milvus 清空失败时保留 SQLite）、
-  多种启动命令下的监听地址检查。
+  `.md` 不区分大小写、`top_k` 和问题校验、CORS、API key、意外错误和 Embedding 主机端口都不泄露、
+  上传同时清空两个存储（以及 Milvus 清空失败时保留 SQLite）、没有有效文件时返回 `400` 并保留索引、
+  Embedding 或 Milvus 插入失败时回滚 SQLite、`rag_sources` 的排名顺序、多种启动命令下的监听地址检查；
+- `tests/test_frontend.py`：在 Node 里用一个简单的 DOM 桩运行 `frontend/script.js` 的 `uploadFile()`，
+  检查任意大小写的 `.md` 文件名都会被发送。需要 `node` 可执行文件（GitHub 的 Ubuntu 运行器自带），没有时跳过。
 
 CI（`.github/workflows/ci.yml`）在 Python 3.10 和 3.12 上运行 ruff 和 pytest，并用 gitleaks 扫描完整 git 历史。
 提交 PR 前的检查清单见 [CONTRIBUTING.md](CONTRIBUTING.md)。
@@ -601,11 +648,13 @@ Simple RAG 是一个本地、单用户的工具，没有针对公网暴露做加
 - **只要别人能访问服务器，就要启用 API key。** 任何能调用 `/upload/` 的人都能替换整个索引。
   只有一个共享 key，没有用户体系，也没有限流。
 - **没有 TLS**：应用只提供明文 HTTP。如果 key 要经过网络传输，请放在带 TLS 的反向代理后面。
-- **不要开自动重载**：`python -m backend.main` 总是以 `reload=True` 启动 uvicorn，这是为开发准备的。
-  长期运行的服务请用 `uvicorn backend.main:app --host … --port …`，不要加 `--reload`。
+- **不要开自动重载**：`python -m backend.main` 和 `uvicorn backend.main:app` 默认都不开。
+  `--reload` 和 `SIMPLE_RAG_RELOAD` 只在开发时使用。
 - **无需认证的端点**：`/health`、`/`、`/docs`、`/redoc` 和 `/openapi.json` 永远不需要 key。
-- **错误细节**：`/query/` 的 `400`、`500`（`Runtime error …`）和 `503` 响应，以及上传时每个文件的消息，
-  都包含底层异常的文本，其中可能有内部主机和端口。意外错误只返回一条通用消息。
+- **错误细节**：Embedding 接口失败时只返回不含 URL、主机和端口的固定消息（`/query/` 返回 `502`，
+  `/upload/` 写进该文件的 `message`），细节只写进服务端日志。`/query/` 的 `500`（`Runtime error …`）和 `503`
+  响应，以及 `/upload/` 中与 Milvus 有关的消息（`Service connection error …`、`Runtime error …`），仍然包含底层异常的文本，
+  其中可能有内部主机和端口。意外错误只返回一条通用消息。
 - **CORS**：`CORS_ALLOW_ORIGINS` 只放你信任的来源。自带页面是同源的，不需要它。
 - **数据**：上传的文件从不写到磁盘；原文和文件名（只保留最后一段）存在 SQLite 文件里，向量存在 Milvus 里，
   两者都要保护好。Embedding API key 只发给 `EMBEDDING_API_URL`，不写进日志。不要提交 `.env`。
@@ -617,26 +666,20 @@ Simple RAG 是一个本地、单用户的工具，没有针对公网暴露做加
 
 - **每个服务只有一个索引**：每次上传都会替换它，不能往已有索引里追加文档。请把所有文档放在一次上传里
   （最多 `MAX_UPLOAD_FILES` 个）。
-- **先清空索引，再检查文件**：一次上传里即使所有文件都被跳过或处理失败，索引也已经被清空。清空之前只检查
-  API key 和文件数（`413`）。
-- **文件处理失败后 SQLite 里可能留下行**：文本块先写进 SQLite，再做向量化。某个文件的 Embedding 调用或
-  Milvus 插入失败时，它的行会留在 SQLite 里、没有对应向量。这些行不会被检索到（检索在 Milvus 上进行），
-  下一次上传时会被删除。
-- **`CHUNK_OVERLAP` 必须小于 `CHUNK_SIZE`**：代码不校验这两个值，否则上传永远不会结束。
+- **存储失败时旧索引也已经没了**：文件在清空之前检查，但 Embedding 接口和 Milvus 要到清空之后才调用。
+  如果所有有效文件都在这一步失败，上传返回 `200`，每个文件带一条错误消息，索引为空。
+- **双重失败后会留下没有文本块的向量**：Milvus 插入之后 SQLite 提交失败、而删除这些向量也失败时，它们会留在 Milvus 里，
+  SQLite 中没有对应的行（会记一条错误日志）。它们不会被显示，但在下一次上传前可能占用 Top-K 名额。
 - **切块很简单**：只按字符数切，块的开头和结尾可能落在词中间；行内 Markdown 标记会留在文本里。
-- **来源顺序**：`rag_sources` 和 `similarity_scores` 按 SQLite 返回行的顺序排列，不一定按距离排名。
 - **距离过滤**：它假定越小越近，适用于 `L2`，不适用于 `IP`、`COSINE` 这类相似度度量。默认阈值 `10000.0`
   几乎不过滤任何结果。
 - **维度不一致只是警告**：Embedding 返回时只记警告，随后 Milvus 插入或搜索才失败。
 - **每个文件一次 Embedding 请求**：一个文件的所有块放在一次请求里，所以会受到服务商对单次输入数量的限制。
   一次查询要发 `3 + N` 次 Embedding 请求（N 为来源数）。
 - **中文提示词模板**：RAG 提示词和“没有找到”的提示是中文，界面文字也是中文。
-- **网页界面细节**：Top-K 输入框只允许 1–10，而 API 允许到 `MAX_TOP_K`。浏览器端的 `.md` 检查区分大小写
-  （后端不区分）。上传结果列表只把以 `Skipped` 或 `Error` 开头的消息标为问题，其他失败消息会出现在成功列表里。
-- **`python -m backend.main` 不能配合 Milvus Lite 使用**：它总是以自动重载方式运行 uvicorn。重载监控进程会先导入应用并打开
-  Milvus Lite 文件，它启动的服务进程就无法再打开同一个文件（`Open local milvus failed`），上传会报
-  `Failed to clear the vector store before upload.`。请改用 `uvicorn backend.main:app --host 127.0.0.1 --port 8000` 启动。
-  这个问题只出现在 Milvus Lite 文件上。
+- **网页界面细节**：Top-K 输入框只允许 1–10，而 API 允许到 `MAX_TOP_K`。上传结果列表只把以 `Skipped` 或 `Error`
+  开头的消息标为问题，其他失败消息（`File content is empty …`、`Embedding generation failed …`、
+  `Service connection error …`、`Runtime error …`、`An unexpected error …`）会出现在成功列表里。
 - **不支持流式输出**：两个答案都完整生成后才返回。
 - **启动比较宽松**：启动时 Milvus 或 Ollama 不可用，服务也照样启动，`/health` 始终报告 `healthy`。
 - **pymilvus**：后端使用 ORM 风格的 pymilvus API，pymilvus 3.1 删除了这套 API，所以 `requirements.txt`
@@ -671,8 +714,20 @@ Simple RAG 是一个本地、单用户的工具，没有针对公网暴露做加
 `LLM_MODEL_NAME` 选择。
 
 **上传报 `Failed to clear the vector store before upload.`，日志里有 `Open local milvus failed`。**
-你用 `python -m backend.main` 启动并使用了 Milvus Lite 文件。停掉它，改用
-`uvicorn backend.main:app --host 127.0.0.1 --port 8000` 启动（见[已知限制](#已知限制)）。
+一个 Milvus Lite 文件同时只能被一个进程打开，说明还有别的进程（例如在同一目录下启动的第二个服务）占着它。
+停掉那个进程，或者给每个服务配置各自的 `MILVUS_CONNECTION_URI`。旧版本的 `python -m backend.main` 总是开着自动重载，
+自己就会触发这个问题；现在的版本不会。
+
+**服务启动失败：`CHUNK_OVERLAP (…) must be smaller than CHUNK_SIZE (…).`**
+每块的起点比上一块往后 `CHUNK_SIZE - CHUNK_OVERLAP` 个字符，所以重叠必须小于块大小。请在 `.env` 或环境变量里改正。
+其他数值配置也按同样方式校验，错误消息会写明变量名。
+
+**上传返回 `400 No valid .md files in the upload; the index was not changed.`。**
+没有任何文件通过检查，消息里列出了每个文件的原因。之前的索引还在。
+
+**查询返回 `502 Could not reach the embedding API.`。**
+`EMBEDDING_API_URL` 上的 Embedding 接口没启动、连不上、超时或返回了错误。响应有意不显示地址，
+URL 和原始错误在服务端日志里。
 
 **应该设置 `MILVUS_URI` 吗？**
 不要，请用 `MILVUS_CONNECTION_URI`。pymilvus 会自己读取 `MILVUS_URI`，而且只接受 http URI，

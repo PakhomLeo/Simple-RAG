@@ -61,8 +61,9 @@ A bar chart shows how close each answer is to each source chunk.
 - The LLM runs in Ollama (default `qwen3:4b`). `<think>…</think>` blocks are removed from answers.
 - Every query returns two answers: one with the retrieved context (RAG) and one from the bare question
   (LLM-only), plus the source chunks and the cosine similarity between each answer and each source chunk.
-- Every upload **replaces** the previous index, so SQLite and Milvus describe the same batch
-  (see [Known limitations](#known-limitations) for the edge cases).
+- Every upload **replaces** the previous index, so SQLite and Milvus describe the same batch. The files are
+  checked first: an upload without a usable `.md` file is rejected with `400` and the index is kept. Each file
+  ends up in both stores or in neither (see [Known limitations](#known-limitations) for the edge cases).
 - Safe defaults: listens on `127.0.0.1`, refuses to start on a public address without an API key,
   CORS allow-list, upload size and count limits.
 - A fake embedding API and fake Ollama (`scripts/fake_services.py`) let you run the whole pipeline and the
@@ -83,16 +84,19 @@ SQLite table.
 
 ### Startup
 
-Everything below happens when `backend.main` is imported, before the server accepts requests:
+Importing `backend.main` only reads the configuration; it does not open SQLite or Milvus. The stores are
+opened in the app lifespan, when the server process starts:
 
-1. `backend/config.py` reads the environment and a `.env` file (see [Configuration](#configuration)).
-   If `ARK_API_KEY` is empty, the import fails with `ValueError: ARK_API_KEY is not set in the environment variables.`
-2. The SQLite table `chunks` is created if it does not exist.
-3. The app connects to Milvus and loads the collection, or creates it (schema and index) if it does not
-   exist. A failure here is only logged; the server still starts and Milvus errors show up on the first request.
-4. The app asks Ollama for its model list once. If Ollama is unreachable it logs a warning and continues.
-5. In the app lifespan, the **bind check** runs: the server refuses to start on a non-loopback address
+1. On import, `backend/config.py` reads the environment and a `.env` file (see [Configuration](#configuration))
+   and validates the numbers. An invalid value stops the import with a `ValueError` that names the variable,
+   for example `CHUNK_OVERLAP (200) must be smaller than CHUNK_SIZE (200).` If `ARK_API_KEY` is empty, the
+   import fails with `ValueError: ARK_API_KEY is not set in the environment variables.`
+2. In the lifespan, the **bind check** runs first: the server refuses to start on a non-loopback address
    without `SIMPLE_RAG_API_KEY` (details in [Deployment and security](#deployment-and-security)).
+3. The SQLite table `chunks` is created if it does not exist.
+4. The app connects to Milvus and loads the collection, or creates it (schema and index) if it does not
+   exist. A failure here is only logged; the server still starts and Milvus errors show up on the first request.
+5. The app asks Ollama for its model list once. If Ollama is unreachable it logs a warning and continues.
 
 ### Upload: parsing and chunking
 
@@ -100,14 +104,11 @@ Everything below happens when `backend.main` is imported, before the server acce
 
 1. If the API key is enabled, the `X-API-Key` header is checked. More than `MAX_UPLOAD_FILES` files is
    rejected with `413` before anything is changed.
-2. **The index is cleared once per batch.** The Milvus collection is dropped first. Only if that succeeds
-   are all rows deleted from the SQLite `chunks` table. If Milvus cannot be cleared, the request fails with
-   `500` and SQLite is left as it was.
-3. Then each file is processed on its own. A problem with one file is reported in that file's result and the
-   next file is processed:
+2. **Every file is checked before anything is changed.** A file that fails a check gets a message in its
+   result and is not stored:
    - The file name is reduced to its base name (directory parts separated by `/` or `\` are dropped),
      trimmed and cut to 255 characters; an empty name becomes `unnamed.md`. Files are never written to disk.
-   - Only names ending in `.md` (case-insensitive) are accepted; others are skipped.
+   - Only names ending in `.md` (any case: `notes.md`, `NOTES.MD`) are accepted; others are skipped.
    - At most `MAX_UPLOAD_FILE_BYTES + 1` bytes are read; a larger file is skipped.
    - The bytes are decoded as UTF-8. Other encodings fail for that file.
    - `markdown-it-py` parses the Markdown. The raw content of every `inline` token (headings, paragraphs,
@@ -116,9 +117,20 @@ Everything below happens when `backend.main` is imported, before the server acce
    - The text is cut into chunks of `CHUNK_SIZE` characters. Each chunk starts
      `CHUNK_SIZE - CHUNK_OVERLAP` characters after the previous one, so neighbours share `CHUNK_OVERLAP`
      characters. With the defaults (200/50) a chunk starts every 150 characters. Chunks are cut by
-     character count, not at word, sentence or heading boundaries.
-   - Each chunk is saved to SQLite with a new UUID4 `chunk_id`, then all chunks of the file are embedded in
-     one request, then the vectors are inserted into Milvus and flushed.
+     character count, not at word, sentence or heading boundaries. A file without any chunk is skipped.
+3. **If no file passed, the request fails with `400`** (`No valid .md files in the upload; the index was not
+   changed.` followed by each file's reason) and both stores are left as they were.
+4. **The index is cleared once per batch.** The Milvus collection is dropped first. Only if that succeeds
+   are all rows deleted from the SQLite `chunks` table. If Milvus cannot be cleared, the request fails with
+   `500` and SQLite is left as it was.
+5. Then each valid file is stored on its own. A problem with one file is reported in that file's result and
+   the next file is stored:
+   - The chunks get new UUID4 `chunk_id`s and are added to one SQLite transaction, which is not committed yet.
+   - All chunks of the file are embedded in one request, the vectors are inserted into Milvus and flushed,
+     and only then is the SQLite transaction committed.
+   - If the embedding call fails, returns the wrong number of vectors, or the Milvus insert fails, the
+     transaction is rolled back. If the commit itself fails after the insert, the inserted vectors are
+     deleted from Milvus again. So a file is either in both stores or in neither.
 
 ### Embeddings
 
@@ -132,9 +144,20 @@ Content-Type: application/json
 ```
 
 It expects `{"data": [{"embedding": [0.1, ...]}, ...]}`, one item per input, in order. The request times
-out after `EMBEDDING_TIMEOUT_SECONDS`. Network errors, HTTP errors and a malformed response are raised as
-`ValueError`. If the vector length differs from `MILVUS_DIMENSION`, only a warning is logged; the Milvus
-insert or search then fails. `ARK_API_KEY` is only sent to `EMBEDDING_API_URL` and is never logged.
+out after `EMBEDDING_TIMEOUT_SECONDS`. A failure is raised as `services.EmbeddingError` (a `ValueError`)
+with a fixed message that never contains the URL, host or port:
+
+| Failure | Message |
+| --- | --- |
+| Connection refused, DNS error or another network error | `Could not reach the embedding API. See the server log for details.` |
+| No answer within `EMBEDDING_TIMEOUT_SECONDS` | `The embedding API did not answer in time. See the server log for details.` |
+| HTTP status 4xx or 5xx | `The embedding API returned HTTP <status>. See the server log for details.` |
+| Body without a `data` list, or an item without an `embedding` list | `Invalid response from the embedding API. See the server log for details.` |
+
+The URL, the original exception and up to 2000 characters of the response body are written to the server
+log only. `/query/` answers these errors with `502`; `/upload/` reports them in the file's `message`.
+If the vector length differs from `MILVUS_DIMENSION`, only a warning is logged; the Milvus insert or search
+then fails. `ARK_API_KEY` is only sent to `EMBEDDING_API_URL` and is never logged.
 
 ### Storage: SQLite and Milvus
 
@@ -161,7 +184,8 @@ such as `./milvus_lite.db` for Milvus Lite (`pip install milvus-lite`). When it 
 Every hit with `distance > MILVUS_SEARCH_MAX_DISTANCE` is dropped. This filter keeps *small* distances,
 which fits the default `L2` metric (smaller is closer). The default threshold `10000.0` is very large, so in
 practice it filters almost nothing; lower it to drop weak matches. The remaining `chunk_id`s are looked up
-in SQLite to get the text and file name.
+in SQLite to get the text and file name, and the rows are put back in the order Milvus ranked the hits
+(closest first). `rag_sources`, the prompt context and `similarity_scores` all use that order.
 
 ### Generation
 
@@ -250,8 +274,10 @@ python -m backend.main
 # or: uvicorn backend.main:app --host 127.0.0.1 --port 8000
 ```
 
-`python -m backend.main` listens on `FASTAPI_HOST:FASTAPI_PORT` (default `127.0.0.1:8000`) with auto-reload
-on. **With Milvus Lite, use the `uvicorn` command** (see [Known limitations](#known-limitations)). Open <http://127.0.0.1:8000/>. The interactive API docs are at <http://127.0.0.1:8000/docs>.
+`python -m backend.main` listens on `FASTAPI_HOST:FASTAPI_PORT` (default `127.0.0.1:8000`) without
+auto-reload. For development, `python -m backend.main --reload` (or `SIMPLE_RAG_RELOAD=1`) restarts the
+server when a source file changes. Both commands work with a Milvus server and with a Milvus Lite file.
+Open <http://127.0.0.1:8000/>. The interactive API docs are at <http://127.0.0.1:8000/docs>.
 
 > **Always open the UI through the backend at `/`.** Opening `frontend/index.html` directly from disk
 > (`file://`) is not supported: the browser blocks the API calls.
@@ -282,7 +308,7 @@ export EMBEDDING_API_URL=http://127.0.0.1:18080/api/v3/embeddings
 export OLLAMA_BASE_URL=http://127.0.0.1:18080
 export MILVUS_CONNECTION_URI=./milvus_lite.db
 export MILVUS_DIMENSION=64                  # must match --dim
-uvicorn backend.main:app --host 127.0.0.1 --port 8000   # not python -m backend.main with Milvus Lite
+python -m backend.main                      # or: uvicorn backend.main:app --host 127.0.0.1 --port 8000
 ```
 
 Then open <http://127.0.0.1:8000/>, upload `examples/sample.md` or `examples/sample.zh-CN.md` and ask a
@@ -296,8 +322,10 @@ Options of the fake server: `--host` (default `127.0.0.1`), `--port` (default `1
 
 The page (`frontend/index.html`, Chinese labels) has four parts:
 
-1. **Upload Markdown documents** – pick one or more `.md` files and click upload. Each file's result
-   (number of chunks, or why it was skipped) is listed. Each upload replaces the index.
+1. **Upload Markdown documents** – pick one or more `.md` files (any case, such as `NOTES.MD`) and click
+   upload. Other files are left out before the upload. Each file's result (number of chunks, or why it was
+   skipped) is listed. Each upload replaces the index; when none of the files is usable, the page shows the
+   `400` message and the index is kept.
 2. **Configure and ask** – Top-K (1–10 in the form; the API allows up to `MAX_TOP_K`), an optional API key
    field (only needed when the backend sets `SIMPLE_RAG_API_KEY`; it is kept in `sessionStorage` for the
    tab), and the question.
@@ -314,7 +342,10 @@ All text from the server is HTML-escaped before it is shown. Chart.js is loaded 
 All settings are environment variables. `backend/config.py` also loads a `.env` file with python-dotenv,
 which looks for it starting in the `backend/` directory and moving up, so put `.env` in the project root.
 Variables already set in the environment win over `.env`. Values are read once at import time; restart the
-server after a change. [`.env.example`](.env.example) lists every variable a user normally sets.
+server after a change. Numeric values are validated when they are read: a value that is not a number or is
+out of range (for example `CHUNK_SIZE=0`, `FASTAPI_PORT=70000`, `EMBEDDING_TIMEOUT_SECONDS=0`, or
+`CHUNK_OVERLAP` not smaller than `CHUNK_SIZE`) stops the app at startup with a `ValueError` that names the
+variable. [`.env.example`](.env.example) lists every variable a user normally sets.
 
 ### Embedding API
 
@@ -323,7 +354,7 @@ server after a change. [`.env.example`](.env.example) lists every variable a use
 | `ARK_API_KEY` | *(none, required)* | Bearer token for the embedding API. The app does not start when it is empty. Any non-empty value works with the fake services. |
 | `EMBEDDING_API_URL` | `https://ark.cn-beijing.volces.com/api/v3/embeddings` | Embedding endpoint (format in [Embeddings](#embeddings)) |
 | `EMBEDDING_MODEL_NAME` | `doubao-embedding-text-240715` | Value of `model` in the embedding request |
-| `EMBEDDING_TIMEOUT_SECONDS` | `60` | Timeout of each embedding request, in seconds (a float) |
+| `EMBEDDING_TIMEOUT_SECONDS` | `60` | Timeout of each embedding request, in seconds (a float, greater than 0) |
 
 ### LLM (Ollama)
 
@@ -356,8 +387,8 @@ server after a change. [`.env.example`](.env.example) lists every variable a use
 
 | Variable | Default | Meaning |
 | --- | --- | --- |
-| `CHUNK_SIZE` | `200` | Chunk length in characters |
-| `CHUNK_OVERLAP` | `50` | Characters shared by neighbouring chunks. **Must be smaller than `CHUNK_SIZE`**; otherwise chunking never ends and the upload hangs. |
+| `CHUNK_SIZE` | `200` | Chunk length in characters (at least 1) |
+| `CHUNK_OVERLAP` | `50` | Characters shared by neighbouring chunks (at least 0). **Must be smaller than `CHUNK_SIZE`**; otherwise the app does not start (`CHUNK_OVERLAP (…) must be smaller than CHUNK_SIZE (…).`). |
 | `SQLITE_DATABASE_URL` | `sqlite:///./rag_sqlite.db` | SQLAlchemy URL of the chunk store. A relative path is relative to the working directory. Only SQLite is supported (the engine passes the SQLite-only `check_same_thread` option). |
 
 ### Server
@@ -365,7 +396,8 @@ server after a change. [`.env.example`](.env.example) lists every variable a use
 | Variable | Default | Meaning |
 | --- | --- | --- |
 | `FASTAPI_HOST` | `127.0.0.1` | Listen address for `python -m backend.main` (the `uvicorn` CLI ignores it) |
-| `FASTAPI_PORT` | `8000` | Listen port for `python -m backend.main` |
+| `FASTAPI_PORT` | `8000` | Listen port for `python -m backend.main` (1–65535) |
+| `SIMPLE_RAG_RELOAD` | *(empty, off)* | Auto-reload for `python -m backend.main`, same as `--reload`. `1`, `true`, `yes` and `on` (any case) mean on. For development only. The `uvicorn` CLI ignores it (use its own `--reload`). |
 | `SERVE_FRONTEND` | `true` | Serve `frontend/` at `/`. `1`, `true`, `yes` and `on` (any case) mean on; any other value means off. |
 
 ### Security
@@ -428,7 +460,7 @@ curl -H "X-API-Key: $SIMPLE_RAG_API_KEY" \
      http://127.0.0.1:8000/upload/
 ```
 
-Response `200`: one object per file, in request order.
+Response `200` (at least one file was usable): one object per file, in request order.
 
 ```json
 [
@@ -438,16 +470,17 @@ Response `200`: one object per file, in request order.
 ]
 ```
 
-A problem with one file does **not** change the status code: the request still returns `200`, and that
-file's `message` says what happened (with `total_chunks` `0`):
+As long as at least one file passed the checks, a problem with a file does **not** change the status code:
+the request returns `200`, and that file's `message` says what happened (with `total_chunks` `0`):
 
 | `message` | Cause |
 | --- | --- |
 | `Document processed and stored successfully.` | Success; `total_chunks` is the number of chunks |
-| `Skipped: Invalid file type. Only .md files are allowed.` | The name does not end in `.md` |
+| `Skipped: Invalid file type. Only .md files are allowed.` | The name does not end in `.md` (in any case) |
 | `Skipped: file is larger than <N> bytes.` | Larger than `MAX_UPLOAD_FILE_BYTES` |
 | `File content is empty or too short to be chunked.` | No text after parsing |
-| `Error processing document (ValueError): …` | Not valid UTF-8, or the embedding API failed |
+| `Error processing document (ValueError): …` | Not valid UTF-8 |
+| `Error processing document: <message>` | The embedding API failed; `<message>` is one of the messages in [Embeddings](#embeddings) |
 | `Embedding generation failed or count mismatch.` | The embedding API returned a different number of vectors |
 | `Service connection error during processing: …` | The connection to Milvus failed |
 | `Runtime error during processing: …` | The Milvus insert failed (for example a dimension mismatch) |
@@ -458,10 +491,17 @@ Request-level errors:
 | Status | `detail` | Cause |
 | --- | --- | --- |
 | `401` | `Invalid or missing API key.` | API key enabled and the header is missing or wrong |
+| `400` | `No valid .md files in the upload; the index was not changed. <file>: <message> …` | No file passed the checks (wrong extension, too large, not UTF-8, no text); nothing was changed |
 | `413` | `Too many files. At most <N> files per upload.` | More than `MAX_UPLOAD_FILES` files; nothing was changed |
 | `422` | FastAPI validation list | No `files` part in the form |
 | `500` | `Failed to clear the vector store before upload.` | Milvus could not be cleared; SQLite was not touched |
 | `500` | `Failed to clear the chunk store before upload.` | SQLite could not be cleared (Milvus was already cleared) |
+
+With only invalid files (`curl … -F files=@LICENSE -F files=@pyproject.toml …`), response `400`:
+
+```json
+{"detail": "No valid .md files in the upload; the index was not changed. LICENSE: Skipped: Invalid file type. Only .md files are allowed. pyproject.toml: Skipped: Invalid file type. Only .md files are allowed."}
+```
 
 ### POST /query/
 
@@ -478,32 +518,32 @@ Response `200` (chunk texts shortened here with `…`):
 
 ```json
 {
-  "rag_answer": "[fake LLM, with RAG context] s the Milvus collection and then deletes all chunk rows from SQLite, …",
+  "rag_answer": "[fake LLM, with RAG context] the prompt. Showing the answer with context next to the answer without context …",
   "rag_sources": [
     {
-      "chunk_id": "248db5b1-3ec3-47d3-ac38-56bba9ef905e",
-      "original_content": "s the Milvus collection and\nthen deletes all chunk rows from SQLite, …",
+      "chunk_id": "bfb950c0-0793-4c8a-8142-171777bd08cb",
+      "original_content": " the prompt. Showing the answer with context next to the answer without context\n…",
       "source_document_name": "sample.md"
     },
     {
-      "chunk_id": "43d2950f-bc0c-4f21-923e-dbe8830f9eae",
-      "original_content": " the prompt. Showing the answer with context next to the answer without context\n…",
+      "chunk_id": "b88fef1b-2827-4d8e-abbd-307785d5f326",
+      "original_content": "s the Milvus collection and\n…",
       "source_document_name": "sample.md"
     }
   ],
   "llm_only_answer": "[fake LLM, no context] I received a 29-character question.",
   "similarity_scores": [
     {
-      "source_chunk_id": "248db5b1-3ec3-47d3-ac38-56bba9ef905e",
+      "source_chunk_id": "bfb950c0-0793-4c8a-8142-171777bd08cb",
       "source_document_name": "sample.md",
-      "similarity_with_rag_answer": 0.9887575046469967,
-      "similarity_with_llm_only_answer": 0.8429327981243102
+      "similarity_with_rag_answer": 0.9862400164430501,
+      "similarity_with_llm_only_answer": 0.8653134681885776
     },
     {
-      "source_chunk_id": "43d2950f-bc0c-4f21-923e-dbe8830f9eae",
+      "source_chunk_id": "b88fef1b-2827-4d8e-abbd-307785d5f326",
       "source_document_name": "sample.md",
-      "similarity_with_rag_answer": 0.9180291468713477,
-      "similarity_with_llm_only_answer": 0.8653134681885776
+      "similarity_with_rag_answer": 0.906391919665587,
+      "similarity_with_llm_only_answer": 0.8429327981243102
     }
   ]
 }
@@ -512,9 +552,9 @@ Response `200` (chunk texts shortened here with `…`):
 | Field | Type | Meaning |
 | --- | --- | --- |
 | `rag_answer` | string | Answer to the RAG prompt (question plus retrieved context) |
-| `rag_sources` | array | Retrieved chunks that passed the distance filter: `chunk_id`, `original_content`, `source_document_name`. Empty when nothing was found. In the order SQLite returns the rows, not necessarily by rank. |
+| `rag_sources` | array | Retrieved chunks that passed the distance filter: `chunk_id`, `original_content`, `source_document_name`. Empty when nothing was found. In Milvus's ranking order, closest first. |
 | `llm_only_answer` | string | Answer to the bare question |
-| `similarity_scores` | array or `null` | Cosine similarity of each answer with each source chunk (see [Similarity comparison](#similarity-comparison)); `null` without sources |
+| `similarity_scores` | array or `null` | Cosine similarity of each answer with each source chunk (see [Similarity comparison](#similarity-comparison)), in the same order as `rag_sources`; `null` without sources |
 
 With an empty index the query still succeeds:
 
@@ -529,10 +569,16 @@ Errors:
 | --- | --- | --- |
 | `401` | `Invalid or missing API key.` | API key enabled and the header is missing or wrong |
 | `422` | FastAPI validation list | Empty or too long `question`, `top_k` out of range, invalid JSON |
-| `400` | `Embedding API request failed: …` or `Invalid response from Embedding API: …` | The embedding API is unreachable, returned an HTTP error or a malformed body (raised as `ValueError`) |
+| `502` | `Could not reach the embedding API. See the server log for details.` and the other messages in [Embeddings](#embeddings) | The embedding API is unreachable, timed out, returned an HTTP error or a malformed body. The detail names no host or port; the server log has the details. |
 | `503` | `Service connection error: …` | The connection to Milvus failed |
 | `500` | `Runtime error during processing: …` | The Milvus search or the Ollama call failed |
 | `500` | `An unexpected error occurred. See the server log for details.` | Any other error; details only in the server log |
+
+With the embedding API stopped:
+
+```json
+{"detail": "Could not reach the embedding API. See the server log for details."}
+```
 
 A validation error (`"top_k": 0`):
 
@@ -561,11 +607,12 @@ Always `200` while the process runs. It does not check Milvus, Ollama or the emb
 | Status | Endpoint | Meaning |
 | --- | --- | --- |
 | `200` | all | Success. For `/upload/`, check each file's `message`. |
-| `400` | `/query/` | Embedding API failure. Also the answer to a CORS preflight from an origin that is not allowed. |
+| `400` | `/upload/` | No file in the upload passed the checks; the index was not changed. Also the answer to a CORS preflight from an origin that is not allowed. |
 | `401` | `/upload/`, `/query/` | Missing or wrong `X-API-Key` |
 | `413` | `/upload/` | Too many files |
 | `422` | `/upload/`, `/query/` | Request validation failed |
 | `500` | `/upload/`, `/query/` | A store could not be cleared; Milvus or Ollama failed; unexpected error |
+| `502` | `/query/` | The embedding API failed |
 | `503` | `/query/` | The Milvus connection failed |
 
 Error bodies are `{"detail": "<message>"}`, except for `422`, where `detail` is FastAPI's list of
@@ -585,14 +632,22 @@ pytest
 The tests need no network, no key and no model. `tests/conftest.py` starts `scripts/fake_services.py` on a
 free port in a background thread, points the backend at it, uses a temporary Milvus Lite file and a
 temporary SQLite file with 32-dimension vectors, and sets `SIMPLE_RAG_BIND_HOST=127.0.0.1` for the bind
-check. The suite (46 tests) covers:
+check. The suite (84 tests) covers:
 
 - `tests/test_services.py` – chunk overlap, Markdown text extraction, cosine similarity edge cases,
   embedding requests (timeout, error handling), local default hosts;
+- `tests/test_config.py` – validation of `CHUNK_SIZE`, `CHUNK_OVERLAP` and the other numeric settings;
+- `tests/test_startup.py` – importing `backend.main` opens no store, reload is off by default, and
+  `python -m backend.main` (with and without reload) serves uploads and queries with Milvus Lite;
 - `tests/test_api.py` – health and the same-origin UI, upload and query end to end, file-name sanitising,
-  size, count and UTF-8 handling, `top_k` and question validation, CORS, the API key, no leaking of
-  unexpected error details, uploads clearing both stores (and keeping SQLite when Milvus cannot be cleared),
-  and the startup bind check for many launch commands.
+  size, count and UTF-8 handling, `.md` in any case, `top_k` and question validation, CORS, the API key,
+  no leaking of unexpected error details or of the embedding host and port, uploads clearing both stores
+  (and keeping SQLite when Milvus cannot be cleared), the `400` that keeps the index when no file is valid,
+  rollback of SQLite when embedding or the Milvus insert fails, the ranking order of `rag_sources`, and the
+  startup bind check for many launch commands;
+- `tests/test_frontend.py` – runs `uploadFile()` from `frontend/script.js` in Node with a small DOM stub and
+  checks that `.md` names in any case are sent. It needs a `node` binary (GitHub's Ubuntu runners have one)
+  and is skipped without it.
 
 CI (`.github/workflows/ci.yml`) runs ruff and pytest on Python 3.10 and 3.12, and gitleaks over the full git
 history. See [CONTRIBUTING.md](CONTRIBUTING.md) for the pull request checklist.
@@ -637,13 +692,14 @@ Read [SECURITY.md](SECURITY.md) before you make it reachable by other people.
   replace the whole index. There is one shared key, no user accounts and no rate limiting.
 - **No TLS.** The app speaks plain HTTP. Put it behind a reverse proxy with TLS if the key travels over a
   network.
-- **Run without auto-reload.** `python -m backend.main` always starts uvicorn with `reload=True`, which is
-  meant for development. For a long-running service use `uvicorn backend.main:app --host … --port …`
-  without `--reload`.
+- **Run without auto-reload.** `python -m backend.main` and `uvicorn backend.main:app` start without it.
+  Keep `--reload` and `SIMPLE_RAG_RELOAD` for development.
 - **Unauthenticated endpoints.** `/health`, `/`, `/docs`, `/redoc` and `/openapi.json` never require the key.
-- **Error details.** The `400`, `500` (`Runtime error …`) and `503` responses of `/query/`, and the per-file
-  upload messages, include the text of the underlying exception, which can contain internal hosts and
-  ports. Unexpected errors return only a generic message.
+- **Error details.** Embedding API failures return a fixed message without URL, host or port (`502` on
+  `/query/`, the file's `message` on `/upload/`); the details go to the server log. The `500`
+  (`Runtime error …`) and `503` responses of `/query/`, and the Milvus messages of `/upload/`
+  (`Service connection error …`, `Runtime error …`), still include the text of the underlying exception,
+  which can contain internal hosts and ports. Unexpected errors return only a generic message.
 - **CORS.** Keep `CORS_ALLOW_ORIGINS` to origins you trust. The bundled UI is same-origin and does not need it.
 - **Data.** Uploaded files are never written to disk; their text and base file name are stored in the SQLite
   file, and the vectors in Milvus. Protect both. The embedding API key is only sent to `EMBEDDING_API_URL`
@@ -656,17 +712,14 @@ Read [SECURITY.md](SECURITY.md) before you make it reachable by other people.
 
 - **One index per server.** Each upload replaces it; you cannot add documents to an existing index. Upload
   all documents in one batch (up to `MAX_UPLOAD_FILES`).
-- **The index is cleared before the files are checked.** An upload that contains only skipped or failing
-  files still leaves an empty index. Only the API key and the file count (`413`) are checked before the clear.
-- **Rows can be left in SQLite after a failed file.** Chunks are saved to SQLite before they are embedded.
-  If the embedding call or the Milvus insert fails for a file, its rows stay in SQLite without vectors. They
-  are never retrieved (search runs on Milvus) and the next upload deletes them.
-- **`CHUNK_OVERLAP` must be smaller than `CHUNK_SIZE`.** The values are not validated; otherwise the upload
-  never finishes.
+- **The old index is gone even if storing fails.** The files are checked before the clear, but the
+  embedding API and Milvus are only called after it. If they fail for every valid file, the upload returns
+  `200` with an error message per file and the index is empty.
+- **Vectors without a chunk after a double failure.** If the SQLite commit fails after the Milvus insert
+  and deleting those vectors fails too, they stay in Milvus without a row (logged as an error). They are
+  never shown, but can take Top-K places until the next upload.
 - **Simple chunking.** Chunks are cut by character count, so they can start or end in the middle of a word.
   Inline Markdown markup stays in the text.
-- **Source order.** `rag_sources` and `similarity_scores` follow the order SQLite returns the rows in, not
-  necessarily the distance ranking.
 - **Distance filter.** It assumes smaller is closer, which matches `L2` but not similarity metrics such as
   `IP` or `COSINE`. The default threshold `10000.0` filters almost nothing.
 - **A dimension mismatch is only a warning** when the embeddings come back; the Milvus insert or search
@@ -675,14 +728,10 @@ Read [SECURITY.md](SECURITY.md) before you make it reachable by other people.
   inputs per request apply. A query makes `3 + N` embedding requests (N sources).
 - **Chinese prompt template.** The RAG prompt and the "nothing found" text are in Chinese, and so are the
   UI labels.
-- **Web UI details.** The Top-K field allows 1–10 although the API allows up to `MAX_TOP_K`. The browser's
-  `.md` check is case-sensitive (the backend's is not). The upload list only marks messages that start
-  with `Skipped` or `Error` as problems, so the other failure messages appear among the successful files.
-- **`python -m backend.main` does not work with Milvus Lite.** It always runs uvicorn with auto-reload.
-  The reloader process imports the app first and opens the Milvus Lite file, so the server process it starts
-  cannot open the same file (`Open local milvus failed`), and uploads fail with
-  `Failed to clear the vector store before upload.` Start the server with
-  `uvicorn backend.main:app --host 127.0.0.1 --port 8000` instead. This only affects Milvus Lite files.
+- **Web UI details.** The Top-K field allows 1–10 although the API allows up to `MAX_TOP_K`. The upload
+  list only marks messages that start with `Skipped` or `Error` as problems, so the other failure messages
+  (`File content is empty …`, `Embedding generation failed …`, `Service connection error …`,
+  `Runtime error …`, `An unexpected error …`) appear among the successful files.
 - **No streaming.** Both answers are generated in full before the response is sent.
 - **Lenient startup.** If Milvus or Ollama is down at startup the server still starts, and `/health`
   reports `healthy` regardless.
@@ -722,8 +771,23 @@ Not without changing code: `services.get_llm_response()` uses the Ollama client.
 serves can be selected with `LLM_MODEL_NAME`.
 
 **Uploads fail with `Failed to clear the vector store before upload.` and the log says `Open local milvus failed`.**
-You started `python -m backend.main` with a Milvus Lite file. Stop it and start
-`uvicorn backend.main:app --host 127.0.0.1 --port 8000` instead (see [Known limitations](#known-limitations)).
+Only one process can open a Milvus Lite file. Another process (for example a second server started from the
+same directory) still has it open. Stop the other process, or give each server its own
+`MILVUS_CONNECTION_URI`. Older versions of `python -m backend.main` always ran with auto-reload and hit this
+on their own; the current version does not.
+
+**The server does not start: `CHUNK_OVERLAP (…) must be smaller than CHUNK_SIZE (…).`**
+Each chunk starts `CHUNK_SIZE - CHUNK_OVERLAP` characters after the previous one, so the overlap must be
+smaller than the chunk size. Fix the values in `.env` or the environment. Other numeric settings are checked
+the same way and the message names the variable.
+
+**The upload returns `400 No valid .md files in the upload; the index was not changed.`**
+None of the files passed the checks; the message lists the reason for each file. The previous index is
+still there.
+
+**A query returns `502 Could not reach the embedding API.`**
+The embedding API at `EMBEDDING_API_URL` is down or unreachable, timed out, or answered with an error.
+The response hides the address on purpose; the server log has the URL and the original error.
 
 **Should I set `MILVUS_URI`?**
 No, use `MILVUS_CONNECTION_URI`. pymilvus reads `MILVUS_URI` itself and only accepts http URIs, so a Milvus
